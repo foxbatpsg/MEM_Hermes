@@ -79,6 +79,12 @@ C:\Projects\MEM_Hermes\minimem\
 
 ### Этап 0. Каркас
 
+Статус: выполнен 2026-09-26. Созданы `minimem/config.json`, `mm/config.py`, `mm/paths.py`,
+`mm/log.py`, `mm/project.py`, каркас CLI `minimem.py` (`status`, `verify`) и
+`minimem/tests/test_stage0_core.py`; прогон 40 тестов — OK. Команды `rebuild-index`,
+`rebuild-digest`, `show`, `compact`, `search`, `stats`, `doctor`, `re-project` и проверки
+журнала/индекса появляются на соответствующих этапах.
+
 Цель: пути, конфигурация, режимы, лог, CLI, проект, timezone.
 
 Что делаем:
