@@ -212,17 +212,21 @@ MiniMem поддерживает независимое включение и о
 
 Минимально поддерживаются четыре независимых конфигурационных флага:
 
+```text
 mode_capture     — запись новых данных в журнал
 mode_return      — возврат дайджеста в контекст Hermes
 mode_search      — поиск и возврат записей памяти в контекст Hermes
 mode_compaction  — выполнение автоматического уплотнения
+```
 
 Значения по умолчанию:
 
+```text
 mode_capture = true
 mode_return = false
 mode_search = false
 mode_compaction = false
+```
 
 Состояние одной функции не должно автоматически изменять состояние остальных.
 
@@ -358,18 +362,22 @@ mode_search = true
 
 Команда minimem status обязана показывать активные режимы:
 
+```text
 mode_capture
 mode_return
 mode_search
 mode_compaction
+```
 
 А также значения, влияющие на безопасность и эксплуатацию:
 
+```text
 compaction_rule2_enabled
 journal_fsync
 journal_timezone
 catch_up_retry_max_turns
 catch_up_budget_seconds
+```
 
 ---
 
@@ -544,6 +552,7 @@ SQLite является производным слоем.
 4. Журнал не редактируется автоматически.
 5. При разборе состояние машины конечно:
 
+   ```text
    state = OUTSIDE
 
    для каждой строки файла:
@@ -560,6 +569,7 @@ SQLite является производным слоем.
    после конца файла:
      если state == INSIDE:
        последняя запись считается повреждённой
+   ```
 
 ---
 
@@ -639,6 +649,7 @@ event_id не зависит от содержимого хода.
 
 Все лимиты конфигурируемые.
 
+```text
 max_user_text          — максимальный размер реплики в записи
 max_assistant_text     — максимальный размер ответа в записи
 max_memory_record      — максимальный размер всей сериализованной записи после удаления секретов и обрезки полей
@@ -648,6 +659,7 @@ max_return_records     — сколько записей максимум воз
 max_return_chars       — максимальный суммарный объём вставки
 max_search_query       — максимальная длина поискового запроса
 max_search_terms       — максимальное количество терминов в поисковом запросе
+```
 
 Превышение лимита не должно останавливать Hermes.
 
@@ -674,15 +686,16 @@ max_memory_record контролирует размер всей сериали�
 
 Шаблоны конфигурируемые. Минимально поддерживаются:
 
-API keys;
-access tokens;
-Bearer ...;
-пароли;
-connection strings;
-административные секреты.
+- API keys;
+- access tokens;
+- Bearer ...;
+- пароли;
+- connection strings;
+- административные секреты.
 
 Порядок операций:
 
+```text
 получение данных
   ↓
 redaction: замена секретов детерминированными placeholder'ами
@@ -700,6 +713,7 @@ content_hash
 event_id
   ↓
 запись в журнал
+```
 
 Redaction выполняется до обрезки: обрезка может разрезать секрет так, что шаблон его уже не найдёт.
 
@@ -709,6 +723,7 @@ Redaction выполняется до обрезки: обрезка может 
 
 Секреты не просто удаляются, а заменяются детерминированными placeholder'ами вида:
 
+```text
 [REDACTED:api_key]
 [REDACTED:access_token]
 [REDACTED:bearer]
@@ -718,6 +733,7 @@ Redaction выполняется до обрезки: обрезка может 
 [REDACTED:jwt]
 [REDACTED:cloud_secret]
 [REDACTED:admin_secret]
+```
 
 Минимальный встроенный набор шаблонов должен покрывать:
 
@@ -1038,17 +1054,21 @@ session_id, cwd, task_id, turn_id, user_message, conversation_history, is_first_
 platform, parent_session_id, sender_id, profile. Поэтому сжатие вычисляет сам MiniMem
 по уменьшению истории:
 
+```text
 hist_len         = len(conversation_history_without_minimem) на текущем ходу
 max_history_len  = наибольшая hist_len, ранее наблюдавшаяся в этой сессии (раздел 17)
+```
 
 conversation_history_without_minimem — это conversation_history, из сообщений которой
 перед измерением удалены блоки памяти MiniMem по делимитерам раздела 13.
 
 Сжатие состоялось, если:
 
+```text
   max_history_len >= compaction_min_drop
   AND hist_len < max_history_len * compaction_shrink_ratio
   AND (max_history_len - hist_len) >= compaction_min_drop
+```
 
 Обновление max_history_len каждый ход: если сжатие на этом ходу не обнаружено —
 max_history_len = max(max_history_len, hist_len); если обнаружено — max_history_len = hist_len.
@@ -1592,6 +1612,7 @@ error_detail_code
 
 ## 20. Конфигурация
 
+```text
 memory_root              — задаётся при установке; внутри хранилища
 sqlite_path              — <memory_root>/minimem.db
 project_mapping          — {} (не найдено — common)
@@ -1632,6 +1653,7 @@ catch_up_budget_seconds  = 8
 pre_llm_timeout          = 15 с
 post_llm_timeout         = 30 с
 fail_closed              = false
+```
 
 Значения по умолчанию заданы отдельно в конфигурационном файле.
 
