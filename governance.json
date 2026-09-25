@@ -1,0 +1,8 @@
+{
+  "index": "INDEX.md",
+  "corpus": [],
+  "id_pattern": "(?:R|Q|G)-[0-9]{3}",
+  "required_ids": [],
+  "registry_heading": "## Реестр",
+  "strict": true
+}
