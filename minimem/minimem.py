@@ -13,6 +13,7 @@ CLI-команды — административные операции и вы
 from __future__ import annotations
 
 import argparse
+import json
 import sqlite3
 import sys
 from pathlib import Path
@@ -338,6 +339,87 @@ def cmd_compact(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK if result.ok else EXIT_PROBLEMS
 
 
+def cmd_doctor(config: Config, args: argparse.Namespace) -> int:
+    """Сверяет таймауты, суббюджеты, конфигурацию и резервную копию (§21.1).
+
+    Команда только читает: ни один файл она не меняет. Работает и при
+    недоступном SQLite — проверки таймаутов и копии от индекса не зависят.
+    """
+
+    from mm import doctor
+
+    memory_root = paths.config_memory_root(config)
+    logger = build_logger(config, memory_root)
+    report = doctor.run_doctor(
+        config,
+        memory_root,
+        hermes_config=getattr(args, "hermes_config", None),
+        backup_settings=getattr(args, "backup_settings", None),
+    )
+
+    hermes = doctor.read_hermes_hooks(getattr(args, "hermes_config", None))
+    print(f"конфигурация MiniMem: {config.path}")
+    print(f"config.yaml Hermes: {hermes.path} ({'прочитан' if hermes.exists else hermes.error})")
+    if hermes.auto_accept is not None:
+        print(f"hooks_auto_accept: {'true' if hermes.auto_accept else 'false'}")
+    for line in report.hook_lines:
+        print(f"  {line}")
+    for note in report.notes:
+        print(f"ok: {note}")
+    print(f"backup: {report.backup.line()}")
+    for finding in report.findings:
+        print(f"проблема: {finding}")
+
+    if report.findings:
+        logger.log(
+            "cli",
+            "doctor",
+            status="error",
+            error_code=";".join(sorted({finding.code for finding in report.findings})),
+            error_detail_code="; ".join(
+                finding.message for finding in report.findings
+            )[:500],
+        )
+    else:
+        logger.log("cli", "doctor", status="ok")
+
+    print(f"итог: {'проблемы' if report.findings else 'без проблем'}")
+    return EXIT_PROBLEMS if report.findings else EXIT_OK
+
+
+def cmd_stats(config: Config, args: argparse.Namespace) -> int:
+    """Агрегирует структурированный лог за период (§21.3, П-10)."""
+
+    from mm import stats
+
+    memory_root = paths.config_memory_root(config)
+    try:
+        since = stats.parse_date_arg(args.since) if args.since else None
+        until = stats.parse_date_arg(args.until) if args.until else None
+    except ValueError as exc:
+        print(f"проблема: {exc}")
+        return EXIT_PROBLEMS
+
+    project = None
+    if getattr(args, "project", None):
+        project, _ = resolve_project(args.project, config["project_mapping"])
+
+    values = config.as_dict()
+    values["__config_hash__"] = config.hash
+    report = stats.collect_from_log(
+        paths.log_path(memory_root, config["log_filename"]),
+        config=values,
+        since=since,
+        until=until,
+        project=project,
+    )
+    if args.json:
+        print(json.dumps(report.as_dict(), ensure_ascii=False, indent=2, sort_keys=False))
+    else:
+        print(report.render())
+    return EXIT_OK
+
+
 def cmd_status(config: Config, args: argparse.Namespace) -> int:
     """Путь журнала, число файлов, состояние SQLite, активные режимы (§21)."""
 
@@ -476,6 +558,8 @@ COMMANDS = {
     "show": cmd_show,
     "search": cmd_search,
     "compact": cmd_compact,
+    "stats": cmd_stats,
+    "doctor": cmd_doctor,
 }
 
 
@@ -540,6 +624,32 @@ def build_parser() -> argparse.ArgumentParser:
         "--projects",
         action="store_true",
         help="ограничить проверку текущим проектом (П-16)",
+    )
+
+    stats_parser = subparsers.add_parser(
+        "stats",
+        help="агрегаты структурированного лога за период (П-10)",
+    )
+    stats_parser.add_argument("--since", default=None, help="дата или метка времени начала")
+    stats_parser.add_argument("--until", default=None, help="дата или метка времени конца")
+    stats_parser.add_argument("--project", type=Path, default=None, help="ограничить проектом")
+    stats_parser.add_argument("--json", action="store_true", help="вывод в формате JSON")
+
+    doctor_parser = subparsers.add_parser(
+        "doctor",
+        help="сверка таймаутов, суббюджетов, конфигурации и резервной копии (П-06, П-19)",
+    )
+    doctor_parser.add_argument(
+        "--hermes-config",
+        type=Path,
+        default=None,
+        help="путь к config.yaml Hermes (по умолчанию %%LOCALAPPDATA%%\\hermes\\config.yaml)",
+    )
+    doctor_parser.add_argument(
+        "--backup-settings",
+        type=Path,
+        default=None,
+        help="путь к backup.json рядом со скриптом копирования (П-19)",
     )
     return parser
 
