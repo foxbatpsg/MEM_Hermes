@@ -16,6 +16,7 @@ MM-168 (П-19), плюс инфраструктурные проверки `doct
 
 from __future__ import annotations
 
+import datetime
 import io
 import json
 import os
@@ -394,6 +395,183 @@ class BackupDoctorTests(BackupSettingsCase):
         self.make_snapshot(TODAY - timedelta(days=9))
         found = doctor.latest_snapshot(self.backup_root)
         self.assertEqual(found, (TODAY, newest))
+
+
+class BackupSettingsSearchTests(unittest.TestCase):
+    """Поиск `backup.json` во всех возможных для программы местах (§21.1).
+
+    Проверка идёт на временных каталогах: реальное окружение подменяется
+    пустым, чтобы поиск не выходил за пределы теста.
+    """
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.memory_root = self.tmp / "memory"
+        self.memory_root.mkdir(parents=True)
+        self.config_dir = self.tmp / "code" / "minimem"
+        self.config_dir.mkdir(parents=True)
+        self.backup_root = self.tmp / "backup"
+        self.backup_root.mkdir()
+
+    def write_settings(self, path: Path, day: date = TODAY) -> Path:
+        """`backup.json` с заданной датой изменения файла."""
+
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps(
+                {
+                    "backup_root": str(self.backup_root),
+                    "minimem_dir": str(CODE_DIR),
+                    "backup_stale_days": 2,
+                },
+                ensure_ascii=False,
+            ),
+            encoding="utf-8",
+        )
+        stamp = datetime.datetime(day.year, day.month, day.day, 12, 0).timestamp()
+        os.utime(path, (stamp, stamp))
+        return path
+
+    def make_snapshot(self, day: date = TODAY) -> Path:
+        snapshot = self.backup_root / day.strftime("%Y-%m-%d")
+        (snapshot / "journal" / "common" / "memory").mkdir(parents=True)
+        (snapshot / "journal" / "common" / "memory" / f"{day:%Y-%m-%d}.md").write_text(
+            "запись\n", encoding="utf-8"
+        )
+        (snapshot / "minimem").mkdir(parents=True)
+        (snapshot / "minimem" / "config.json").write_text("{}", encoding="utf-8")
+        return snapshot
+
+    def test_candidates_cover_every_program_location(self) -> None:
+        """В перечень входят переменная окружения, каталоги программы и хранилища."""
+
+        override = self.tmp / "override.json"
+        env = {
+            "MINIMEM_BACKUP_SETTINGS": str(override),
+            "LOCALAPPDATA": str(self.tmp / "localappdata"),
+            "USERPROFILE": str(self.tmp / "home"),
+        }
+        candidates = doctor.backup_settings_candidates(
+            self.memory_root, self.config_dir, env=env, drive_roots=[]
+        )
+        names = [str(path) for path in candidates]
+        self.assertEqual(names[0], str(override))
+        for expected in (
+            self.config_dir / "minimem-backup" / "backup.json",
+            self.config_dir / "backup.json",
+            self.memory_root / "minimem-backup" / "backup.json",
+            self.memory_root / "backup.json",
+            self.memory_root.parent / "backup.json",
+            self.tmp / "localappdata" / "minimem-backup" / "backup.json",
+            self.tmp / "home" / "minimem-backup" / "backup.json",
+        ):
+            self.assertIn(str(expected), names)
+
+    def test_candidates_without_duplicates(self) -> None:
+        """Совпадающие пути перечисляются один раз."""
+
+        candidates = doctor.backup_settings_candidates(
+            self.memory_root, self.memory_root.parent, env={}, drive_roots=[]
+        )
+        keys = {os.path.normcase(str(path)) for path in candidates}
+        self.assertEqual(len(keys), len(candidates))
+
+    def test_newest_settings_file_wins(self) -> None:
+        """Из нескольких найденных выбирается самый свежий по дате файла."""
+
+        self.write_settings(self.memory_root / "backup.json", TODAY - timedelta(days=3))
+        newest = self.write_settings(
+            self.config_dir / "minimem-backup" / "backup.json", TODAY
+        )
+        self.assertEqual(self.locate(), newest)
+
+    def test_environment_override_competes_by_date(self) -> None:
+        """`MINIMEM_BACKUP_SETTINGS` — кандидат, а не безусловный приоритет."""
+
+        override = self.write_settings(
+            self.tmp / "override.json", TODAY - timedelta(days=5)
+        )
+        in_code_dir = self.write_settings(
+            self.config_dir / "minimem-backup" / "backup.json", TODAY - timedelta(days=1)
+        )
+        env = {"MINIMEM_BACKUP_SETTINGS": str(override)}
+        self.assertEqual(self.locate(env), in_code_dir)
+
+    def drive_roots(self) -> list[Path]:
+        """Изолированные «диски» теста: настоящие локальные диски не обходятся."""
+
+        return [self.tmp / "disk"]
+
+    def locate(self, env: dict[str, str] | None = None) -> Path | None:
+        return doctor.locate_backup_settings(
+            self.memory_root,
+            self.config_dir,
+            env=env if env is not None else {},
+            drive_roots=self.drive_roots(),
+        )
+
+    def check(self) -> doctor.BackupReport:
+        return doctor.check_backup(
+            self.memory_root,
+            None,
+            today=TODAY,
+            config_dir=self.config_dir,
+            env={},
+            drive_roots=self.drive_roots(),
+        )
+
+    def test_settings_on_separate_drive_are_found(self) -> None:
+        """Копирование на отдельном томе: `<том>\\minimem-backup\\backup.json`."""
+
+        on_drive = self.write_settings(
+            self.tmp / "disk" / "minimem-backup" / "backup.json", TODAY
+        )
+        self.assertEqual(self.locate(), on_drive)
+
+    def test_local_drive_roots_are_existing_only(self) -> None:
+        """В перечень дисков попадают только существующие корни."""
+
+        roots = doctor.local_drive_roots()
+        self.assertTrue(roots)
+        for root in roots:
+            self.assertTrue(root.is_dir())
+            drive, tail = os.path.splitdrive(str(root))
+            self.assertTrue(drive)
+            self.assertEqual(tail, "\\" if os.name == "nt" else root.anchor)
+
+    def test_equal_dates_fall_back_to_priority(self) -> None:
+        """При равной дате побеждает более приоритетное место."""
+
+        override = self.write_settings(self.tmp / "override.json", TODAY)
+        self.write_settings(self.config_dir / "backup.json", TODAY)
+        env = {"MINIMEM_BACKUP_SETTINGS": str(override)}
+        self.assertEqual(self.locate(env), override)
+
+    def test_nothing_found_returns_none(self) -> None:
+        """Ни одного файла настроек — проверка пропускается."""
+
+        self.assertIsNone(self.locate())
+        report = self.check()
+        self.assertEqual(report.decision, doctor.BACKUP_SKIPPED)
+        self.assertTrue(report.ok)
+
+    def test_report_names_the_chosen_file(self) -> None:
+        """В строке отчёта видно, какой файл выбран и сколько найдено."""
+
+        self.write_settings(self.memory_root / "backup.json", TODAY - timedelta(days=3))
+        chosen = self.write_settings(
+            self.config_dir / "minimem-backup" / "backup.json", TODAY
+        )
+        self.make_snapshot(TODAY)
+        report = self.check()
+        self.assertEqual(report.decision, doctor.BACKUP_OK)
+        self.assertEqual(report.settings_path, chosen)
+        line = report.line()
+        self.assertIn(str(chosen), line)
+        self.assertIn("более свежий из 2 найденных", line)
+
 
 
 def log_entry(operation: str, **fields) -> dict:

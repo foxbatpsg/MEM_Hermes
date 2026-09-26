@@ -17,7 +17,7 @@ import re
 from dataclasses import dataclass, field
 from datetime import date
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any, Mapping, Sequence
 
 from .config import (
     CATCH_UP_SHARE,
@@ -54,6 +54,9 @@ HERMES_EVENTS: dict[str, str] = {
 #: бэкап и восстановление», раздел 3).
 BACKUP_SETTINGS_FILENAME = "backup.json"
 
+#: Имя каталога копирования; он же — имя файла настроек без расширения.
+BACKUP_DIRNAME = "minimem-backup"
+
 _SNAPSHOT_NAME = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 _YAML_KEY = re.compile(r"^(?P<indent>\s*)(?P<key>[A-Za-z0-9_.-]+)\s*:\s*(?P<value>.*)$")
 _YAML_ITEM = re.compile(
@@ -88,22 +91,39 @@ class BackupReport:
     has_journal: bool = False
     has_config: bool = False
     detail: str = ""
+    settings_found: list[Path] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
         return self.decision in (BACKUP_OK, BACKUP_SKIPPED)
 
+    def settings_line(self) -> str:
+        """Откуда взяты настройки копирования: путь и число найденных файлов."""
+
+        if self.settings_path is None:
+            return ""
+        if len(self.settings_found) > 1:
+            return (
+                f"настройки {self.settings_path} (более свежий из "
+                f"{len(self.settings_found)} найденных)"
+            )
+        return f"настройки {self.settings_path}"
+
     def line(self) -> str:
         """Строка отчёта: дата, путь, возраст в сутках и решение (§21.1)."""
 
+        settings = self.settings_line()
         if self.decision == BACKUP_SKIPPED:
-            return f"резервная копия: {self.detail or self.settings_note}"
+            if not settings:
+                return f"резервная копия: {self.detail or self.settings_note}"
+            return f"резервная копия: {self.detail or self.settings_note}; {settings}"
         if self.snapshot_path is None:
             return f"резервная копия: {self.decision} ({self.detail})"
         return (
             f"резервная копия: {self.decision}; дата {self.snapshot_date}, "
             f"путь {self.snapshot_path}, возраст {self.age_days} сут, "
             f"порог {self.threshold_days} сут ({self.threshold_source}); {self.detail}"
+            f"; {settings}"
         )
 
 
@@ -410,26 +430,122 @@ def check_config_invariants(config: Config, report: DoctorReport) -> None:
 # --- проверка резервной копии журнала (П-19) ---------------------------------
 
 
-def locate_backup_settings(memory_root: Path) -> Path | None:
-    """Ищет `backup.json` рядом со скриптом копирования (П-19, §21.1).
+def local_drive_roots() -> list[Path]:
+    """Корни доступных локальных дисков: установка копирования на отдельном томе.
 
-    Порядок: переменная окружения `MINIMEM_BACKUP_SETTINGS`, затем запасной
-    каталог `minimem-backup` рядом с `memory_root` (раздел 3 документа
-    «Установка, бэкап и восстановление»). Ничего не найдено — проверка
-    пропускается, это не ошибка `doctor`.
+    Проверяется только существование корня, обход каталогов не выполняется.
+    Пустой список на системах без локальных дисков в этом смысле.
     """
 
-    override = os.environ.get("MINIMEM_BACKUP_SETTINGS")
+    roots: list[Path] = []
+    if os.name != "nt":
+        anchor = Path(Path.cwd().anchor or "/")
+        return [anchor] if anchor.exists() else []
+    for letter in "ABCDEFGHIJKLMNOPQRSTUVWXYZ":
+        candidate = Path(f"{letter}:\\")
+        try:
+            if not candidate.is_dir():
+                continue
+        except OSError:
+            continue
+        roots.append(candidate)
+    return roots
+
+
+def backup_settings_candidates(
+    memory_root: Path,
+    config_dir: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    drive_roots: Sequence[Path] | None = None,
+) -> list[Path]:
+    """Перечисляет все места, где программа ищет `backup.json` (П-19, §21.1).
+
+    Порядок — только приоритет при равной дате файла:
+
+    1. `MINIMEM_BACKUP_SETTINGS` — явное указание владельца;
+    2. каталог `minimem-backup` рядом с конфигурацией MiniMem и сам каталог
+       конфигурации (установка из репозитория);
+    3. каталог `minimem-backup` внутри `memory_root`, рядом с ним и в его
+       родителе (установка рядом с хранилищем, раздел 3 документа
+       «Установка, бэкап и восстановление»);
+    4. `%LOCALAPPDATA%`, `%APPDATA%`, `%PROGRAMDATA%` и домашний каталог —
+       каждый с подкаталогом `minimem-backup` и без него;
+    5. корень каждого локального диска с подкаталогом `minimem-backup` —
+       установка копирования на отдельном томе (на этой машине
+       `D:\\minimem-backup`).
+    """
+
+    environ = os.environ if env is None else env
+    roots: list[Path] = []
+    if config_dir is not None:
+        roots.extend((config_dir / BACKUP_DIRNAME, config_dir))
+    roots.extend(
+        (
+            memory_root / BACKUP_DIRNAME,
+            memory_root,
+            memory_root.parent,
+        )
+    )
+
+    candidates: list[Path] = []
+    seen: set[str] = set()
+    override = (environ.get("MINIMEM_BACKUP_SETTINGS") or "").strip()
     if override:
-        return Path(override)
-    candidates = [
-        memory_root.parent / "minimem-backup" / BACKUP_SETTINGS_FILENAME,
-        memory_root / "minimem-backup" / BACKUP_SETTINGS_FILENAME,
-    ]
-    for candidate in candidates:
-        if candidate.is_file():
-            return candidate
-    return None
+        candidates.append(Path(os.path.expandvars(override)).expanduser())
+        seen.add(os.path.normcase(str(candidates[-1])))
+
+    for name in ("LOCALAPPDATA", "APPDATA", "PROGRAMDATA"):
+        value = (environ.get(name) or "").strip()
+        if not value:
+            continue
+        roots.append(Path(value))
+        roots.append(Path(value) / BACKUP_DIRNAME)
+    home = (environ.get("USERPROFILE") or environ.get("HOME") or "").strip()
+    if home:
+        roots.append(Path(home))
+        roots.append(Path(home) / BACKUP_DIRNAME)
+
+    for root in local_drive_roots() if drive_roots is None else drive_roots:
+        roots.append(Path(root) / BACKUP_DIRNAME)
+
+    for root in roots:
+        candidate = root / BACKUP_SETTINGS_FILENAME
+        key = os.path.normcase(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        candidates.append(candidate)
+    return candidates
+
+
+def locate_backup_settings(
+    memory_root: Path,
+    config_dir: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    drive_roots: Sequence[Path] | None = None,
+) -> Path | None:
+    """Ищет `backup.json` во всех возможных для программы местах (§21.1).
+
+    Из найденных выбирается самый свежий по дате изменения файла; при равной
+    дате — первый по приоритету (см. `backup_settings_candidates`).
+    Ничего не найдено — проверка пропускается, это не ошибка `doctor`.
+    """
+
+    environ = os.environ if env is None else env
+    found: list[tuple[float, int, Path]] = []
+    for index, candidate in enumerate(
+        backup_settings_candidates(memory_root, config_dir, env=environ, drive_roots=drive_roots)
+    ):
+        try:
+            if not candidate.is_file():
+                continue
+            stamp = candidate.stat().st_mtime
+        except OSError:
+            continue
+        found.append((stamp, -index, candidate))
+    if not found:
+        return None
+    return max(found, key=lambda item: (item[0], item[1]))[2]
 
 
 def read_backup_settings(path: Path) -> tuple[dict[str, Any] | None, str]:
@@ -474,17 +590,33 @@ def check_backup(
     memory_root: Path,
     settings_path: Path | None = None,
     today: date | None = None,
+    config_dir: Path | None = None,
+    env: Mapping[str, str] | None = None,
+    drive_roots: Sequence[Path] | None = None,
 ) -> BackupReport:
     """Проверяет наличие и свежесть последней резервной копии журнала (П-19).
 
+    Файл настроек копирования ищется во всех возможных для программы местах,
+    при нескольких найденных выбирается самый свежий по дате (§21.1).
     Отсутствие файла настроек пропускает проверку с пометкой, ошибкой это не
-    считается (§21.1). Копия непригодна, если она старше порога владельца
+    считается. Копия непригодна, если она старше порога владельца
     либо если в слепке нет ни журнала, ни копии `config.json`.
     """
 
     report = BackupReport()
     if settings_path is None:
-        settings_path = locate_backup_settings(memory_root)
+        report.settings_found = [
+            candidate
+            for candidate in backup_settings_candidates(
+                memory_root, config_dir, env=env, drive_roots=drive_roots
+            )
+            if candidate.is_file()
+        ]
+        settings_path = locate_backup_settings(
+            memory_root, config_dir, env=env, drive_roots=drive_roots
+        )
+    else:
+        report.settings_found = [Path(settings_path)]
     if settings_path is None or not Path(settings_path).is_file():
         # Отсутствие файла настроек — не ошибка: копирование вне области MiniMem.
         report.settings_path = Path(settings_path) if settings_path else None
@@ -560,6 +692,7 @@ def run_doctor(
     hermes_config: Path | None = None,
     backup_settings: Path | None = None,
     today: date | None = None,
+    env: Mapping[str, str] | None = None,
 ) -> DoctorReport:
     """Выполняет все проверки `doctor` и возвращает отчёт (ТЗ v1.7 §21.1)."""
 
@@ -570,7 +703,14 @@ def run_doctor(
     check_timeouts(config, hermes, report)
     check_budgets(config, report)
     check_config_invariants(config, report)
-    report.backup = check_backup(memory_root, backup_settings, today)
+    config_path = getattr(config, "path", None)
+    report.backup = check_backup(
+        memory_root,
+        backup_settings,
+        today,
+        config_dir=Path(config_path).parent if config_path else None,
+        env=env,
+    )
     if not report.backup.ok:
         report.add(CODE_BACKUP_STALE, report.backup.line())
     return report
