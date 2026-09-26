@@ -19,6 +19,7 @@ from typing import Any, Iterable, Mapping
 
 from . import canonical, compaction, journal, paths
 from .log import Logger
+from .project import resolve_project
 from .store import Store
 
 #: Максимум записей за один проход (§9.2 п.12, §19.1).
@@ -404,6 +405,9 @@ class VerifyReport:
     bad_cursors: list[str] = field(default_factory=list)
     hash_mismatch: list[str] = field(default_factory=list)
     multi_revision: list[str] = field(default_factory=list)
+    format_newer: list[str] = field(default_factory=list)
+    externally_modified: list[str] = field(default_factory=list)
+    project_mismatch: list[str] = field(default_factory=list)
 
     @property
     def ok(self) -> bool:
@@ -415,12 +419,17 @@ def verify(
     memory_root: Path,
     logger: Logger,
     project: str | None = None,
+    project_mapping: Mapping[str, str] | None = None,
 ) -> VerifyReport:
     """Проверяет соответствие журнала и индекса (§21.5).
 
     Проверяются: доступность индексных таблиц, записи журнала, отсутствующие
     в индексе, дубликаты event_id, повреждённые записи, производные ключи,
-    недействительные курсоры, соответствие content_hash и ревизии.
+    недействительные курсоры, внешнее переписывание журнала, записи формата
+    новее поддерживаемого, соответствие content_hash и ревизии.
+
+    `project_mapping` включает сверку `project_path` записей с текущим
+    маппингом — `verify --projects` (MM-156, П-16).
     """
 
     report = VerifyReport()
@@ -440,6 +449,18 @@ def verify(
             journal_ids.add(record.event_id)
             if record.metadata.get("turn_source") == "derived":
                 report.derived_turns.append(record.event_id)
+            if record.fmt > canonical.RECORD_FMT:
+                # Запись новее MiniMem: она индексируется, но `verify`
+                # предупреждает, а не объявляет повреждённой (MM-120).
+                report.format_newer.append(f"{key}@{record.offset} fmt={record.fmt}")
+            if project_mapping is not None:
+                current, _ = resolve_project(
+                    record.metadata.get("project_path", ""), project_mapping
+                )
+                if current != record.project:
+                    report.project_mismatch.append(
+                        f"{record.project} -> {current} ({record.event_id})"
+                    )
             meta = store.meta_get(record.event_id)
             if meta is None:
                 report.missing_in_index.append(f"{key}@{record.offset} {record.event_id}")
@@ -481,6 +502,24 @@ def verify(
             )
         elif size < int(cursor["file_size"] or 0):
             report.bad_cursors.append(f"{cursor['journal_file']}: файл уменьшился")
+        # Внешнее переписывание: размер совпал, а время изменения — нет, значит
+        # файл правили вне MiniMem (MM-150, П-13).
+        mtime = path.stat().st_mtime
+        if (
+            cursor["mtime"] is not None
+            and abs(mtime - float(cursor["mtime"])) > 1.0
+            and abs(size - int(cursor["file_size"] or 0)) < 1
+        ):
+            report.externally_modified.append(
+                f"{cursor['journal_file']}: время изменения {mtime:.0f} не совпадает с курсором"
+            )
+            logger.log(
+                "indexer",
+                "journal_externally_modified",
+                status="error",
+                journal_file=cursor["journal_file"],
+                error_code="journal_externally_modified",
+            )
 
     for name, items in (
         ("записи журнала, отсутствующие в индексе", report.missing_in_index),
@@ -502,6 +541,15 @@ def verify(
         )
     if report.multi_revision:
         report.notes.append(f"event_id с несколькими ревизиями: {len(report.multi_revision)}")
+    for name, items in (
+        ("записи формата новее поддерживаемого", report.format_newer),
+        ("внешне переписанные файлы журнала", report.externally_modified),
+        ("записи с расхождением project_path", report.project_mismatch),
+    ):
+        if items:
+            report.notes.append(f"{name}: {len(items)}")
+        else:
+            report.notes.append(f"{name}: нет")
 
     logger.log(
         "indexer",

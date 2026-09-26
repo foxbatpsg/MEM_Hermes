@@ -42,6 +42,7 @@ CAPTURE_OPERATIONS = frozenset(
         "record_body_withheld_redaction_failed",
         "insert_stripped",
         "redaction_applied",
+        "sender_changed",
     }
 )
 

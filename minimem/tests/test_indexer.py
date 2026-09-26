@@ -107,7 +107,7 @@ class IndexBasicsTests(IndexerTestCase):
         self.assertEqual(meta["truncated"], "none")
 
     def test_11_rebuild_after_deleting_db_restores_index(self) -> None:
-        """MM-11. После удаления SQLite rebuild-index полностью восстанавливает индекс."""
+        """MM-42, MM-11. После удаления SQLite rebuild-index полностью восстанавливает индекс."""
 
         capture_turn(self.tmp, 1, self.config)
         capture_turn(self.tmp, 2, self.config)
@@ -213,7 +213,7 @@ class DuplicateAndRevisionTests(IndexerTestCase):
         self.assertEqual(self.store.meta_get(sorted(first)[0]), meta_first)
 
     def test_104_verify_reports_duplicate_physical_records(self) -> None:
-        """MM-104. verify сообщает о duplicate physical journal records."""
+        """MM-98, MM-104. verify сообщает о duplicate physical journal records."""
 
         capture_turn(self.tmp, 1, self.config)
         self.run_index()

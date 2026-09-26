@@ -553,7 +553,7 @@ class SessionEndLifecycleTests(LifecycleTestCase):
         self.assertIn(compaction.OPERATION_SKIPPED, log_operations(self.tmp))
 
     def test_interrupted_session_end_writes_completion(self) -> None:
-        """П-17. Прерванная сессия: `completed = 0` и «Завершение: прервано»."""
+        """MM-158, П-17. Прерванная сессия: `completed = 0`, «Завершение: прервано»."""
 
         self.prepare_session()
         self.end_session(session_end_event(PREVIOUS, interrupted=True))
@@ -561,6 +561,44 @@ class SessionEndLifecycleTests(LifecycleTestCase):
         header = digest.read_header(self.digest_path(PREVIOUS))
         self.assertIsNotNone(header)
         self.assertEqual(header.completion, digest.COMPLETION_INTERRUPTED)
+
+    def test_158_interrupted_digest_carries_warning_on_insert(self) -> None:
+        """MM-158. При вставке прерванного дайджеста в текст идёт предупреждение."""
+
+        self.add_turns(1, session_id=PREVIOUS, base=MOMENT - timedelta(days=1))
+        built = digest.build_digest(
+            self.store,
+            self.config,
+            self.root,
+            self.logger,
+            PREVIOUS,
+            "work",
+            completion=digest.COMPLETION_INTERRUPTED,
+        )
+        self.assertTrue(built.created_ok)
+        path = Path(built.path)
+        header = digest.read_header(path)
+        self.assertEqual(header.completion, digest.COMPLETION_INTERRUPTED)
+        candidate = ret.DigestCandidate(
+            path=path, header=header, last_turn_utc=MOMENT.isoformat()
+        )
+        text, _ = ret.build_return_text(candidate, self.config, self.logger)
+        self.assertIn(ret.INTERRUPTED_WARNING, text)
+
+        # Завершённая сессия предупреждения не получает.
+        self.add_turns(1, session_id=SESSION, base=MOMENT)
+        done = digest.build_digest(
+            self.store, self.config, self.root, self.logger, SESSION, "work"
+        )
+        done_header = digest.read_header(Path(done.path))
+        plain, _ = ret.build_return_text(
+            ret.DigestCandidate(
+                path=Path(done.path), header=done_header, last_turn_utc=MOMENT.isoformat()
+            ),
+            self.config,
+            self.logger,
+        )
+        self.assertNotIn(ret.INTERRUPTED_WARNING, plain)
 
     def test_session_end_hook_process_exits_zero_with_empty_output(self) -> None:
         """§19.2, §26.2. Хук всегда код 0 и пустой объект в stdout."""

@@ -120,9 +120,15 @@ def _line_bounds(lines: list[str]) -> list[tuple[int, int]]:
 def strip_memory_block(user_message: str) -> StripResult:
     """Удаляет ровно один блок памяти MiniMem из реплики (§13, П-01).
 
-    Блок — от вводной строки про данные из памяти до первого совпадения
-    завершающего делимитера (оригинального или sanitized). Вложенные
-    ложные делимитеры внутри блока второй блок не создают.
+    Блок — от вводной строки о данных из памяти до завершающего делимитера
+    (оригинального или sanitized). Вложенные ложные делимитеры внутри блока
+    второй блок не создают.
+
+    Граница блока — последний оригинальный `END_DELIMITER` после вводной
+    строки: sanitized-делимитер внутри тела появляется ровно там, где
+    санитизация заменила разделитель в содержимом, и он не может обрывать
+    блок раньше времени (MM-127). Оригинального делимитера в блоке нет —
+    признаком границы служит первый sanitized-вариант (П-05).
 
     Реплика, начинающаяся с делимитера, но не содержащая вводной строки,
     блоком памяти не считается и сохраняется полностью (MM-118).
@@ -144,12 +150,21 @@ def strip_memory_block(user_message: str) -> StripResult:
 
     end_index = next(
         (
-            i
-            for i in range(intro_index, len(lines))
-            if lines[i].strip() in (END_DELIMITER, SANITIZED_END_DELIMITER)
+            index
+            for index in range(len(lines) - 1, intro_index, -1)
+            if lines[index].strip() == END_DELIMITER
         ),
         None,
     )
+    if end_index is None:
+        end_index = next(
+            (
+                index
+                for index in range(intro_index, len(lines))
+                if lines[index].strip() == SANITIZED_END_DELIMITER
+            ),
+            None,
+        )
     if end_index is None:
         return StripResult(user_message, 0, 0, malformed=True)
 

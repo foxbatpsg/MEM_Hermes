@@ -275,7 +275,7 @@ class QueryBuildTests(unittest.TestCase):
         self.assertEqual(len(stems), DEFAULTS["max_search_terms"])
 
     def test_query_modes_use_expected_operator(self) -> None:
-        """П-11. Первая ступень — AND, вторая — релаксация до OR."""
+        """MM-143, П-11. Первая ступень — AND, вторая — релаксация до OR."""
 
         self.assertEqual(
             query.build_match_query(["памят", "журнал"], search.MODE_ALL),
@@ -374,7 +374,7 @@ class SearchPipelineTests(SearchTestCase):
         self.assertEqual(records[-1]["error_detail_code"], "return_turn")
 
     def test_mode_search_false_inserts_nothing(self) -> None:
-        """§3.7.6. При mode_search=false поиск не выполняется."""
+        """MM-53, §3.7.6. При mode_search=false поиск не выполняется."""
 
         self.add_turns(1, user="настройка бэкапа журнала")
         self.config["mode_search"] = False

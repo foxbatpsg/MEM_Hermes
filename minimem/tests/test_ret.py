@@ -293,7 +293,7 @@ class FirstTurnReturnTests(ReturnTestCase):
                 self.assertIn(insert.END_DELIMITER, result.text)
 
     def test_30_selection_uses_last_turn_and_excludes_current_session(self) -> None:
-        """MM-30. Выбор по «Последнему ходу» в UTC, текущая сессия исключена."""
+        """MM-90, MM-30. Выбор по «Последнему ходу» в UTC, текущая сессия исключена."""
 
         self.prepare_previous()
         # Более ранний по времени создания дайджест не должен выиграть:
@@ -355,7 +355,7 @@ class FirstTurnReturnTests(ReturnTestCase):
         self.assertIn("return_digest_damaged", log_operations(self.tmp))
 
     def test_unreadable_last_turn_falls_back_to_mtime(self) -> None:
-        """MM-96 (подготовка). Fallback на mtime и событие §11.1 п.5."""
+        """MM-91, MM-96 (подготовка). Fallback на mtime и событие §11.1 п.5."""
 
         path = digest.digest_path(self.root, "work", "2026-09-19-01")
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -425,7 +425,7 @@ class CompactionReturnTests(ReturnTestCase):
         self.assertIn("return_digest_rebuild", log_operations(self.tmp))
 
     def test_45_decision_uses_thresholds_and_is_logged(self) -> None:
-        """MM-45. Решение о сжатии считается по порогам и попадает в лог."""
+        """MM-122, MM-45. Решение о сжатии считается по порогам и попадает в лог."""
 
         config = self.config
         big = session.HistoryMetrics(hist_msgs=20, hist_chars=20_000)
@@ -452,6 +452,21 @@ class CompactionReturnTests(ReturnTestCase):
         last = records[-1]
         for field_name in ("hist_msgs", "hist_chars", "compaction_decision", "threshold_applied"):
             self.assertIn(field_name, last)
+        self.assertEqual(last["compaction_decision"], session.DECISION_COMPACTED)
+
+    def test_125_decision_log_carries_all_required_fields(self) -> None:
+        """MM-125. Лог решения содержит hist_msgs, max_msgs, hist_chars, max_chars."""
+
+        self.grow_then_shrink()
+        records = [
+            item for item in log_records(self.tmp) if item["operation"] == "compaction_detected"
+        ]
+        self.assertTrue(records)
+        last = records[-1]
+        for field_name in ("hist_msgs", "hist_chars", "compaction_decision", "threshold_applied"):
+            self.assertIn(field_name, last)
+        self.assertIn("max_msgs", last)
+        self.assertIn("max_chars", last)
         self.assertEqual(last["compaction_decision"], session.DECISION_COMPACTED)
 
     def test_45_cooldown_blocks_repeat_detection(self) -> None:

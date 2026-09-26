@@ -144,7 +144,7 @@ class DeadlineTests(unittest.TestCase):
         self.assertEqual(report.findings, [])
 
     def test_missing_hook_registration_is_reported(self) -> None:
-        """Нет записи `on_session_end` — это расхождение `config_invalid`."""
+        """MM-131. Нет записи `on_session_end` — это расхождение `config_invalid`."""
 
         with tempfile.TemporaryDirectory() as tmp:
             config_path = Path(tmp) / "config.yaml"
@@ -1121,7 +1121,7 @@ class HookScriptsTests(unittest.TestCase):
     "тест 47 запускает настоящий Hermes и выполняется только по команде владельца",
 )
 class InstallationTest47(unittest.TestCase):
-    """Тест 47 (§23): все три хука зарегистрированы, `hermes hooks doctor` здоров.
+    """MM-47 (§23): три хука зарегистрированы, `hermes hooks doctor` здоров.
 
     Запускается только при `MINIMEM_RUN_HERMES_TESTS=1` и только по команде
     владельца: тест обращается к установленному Hermes и его конфигурации.

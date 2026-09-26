@@ -514,7 +514,13 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
             store = None
         if store is not None:
             with store:
-                report = indexer.verify(store, memory_root, logger, project=project)
+                report = indexer.verify(
+                    store,
+                    memory_root,
+                    logger,
+                    project=project,
+                    project_mapping=config["project_mapping"] if project else None,
+                )
                 notes.extend(report.notes)
                 problems.extend(report.problems)
                 for item in report.missing_in_index[:10]:
@@ -523,6 +529,23 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
                     print(f"дубль: {item}")
                 for item in report.bad_cursors[:10]:
                     print(f"курсор: {item}")
+                for item in report.derived_turns[:10]:
+                    print(f"производный ключ хода: {item}")
+                for item in report.format_newer[:10]:
+                    print(f"формат новее: {item}")
+                for item in report.externally_modified[:10]:
+                    print(f"внешнее переписывание: {item}")
+                if project:
+                    for item in report.project_mismatch[:10]:
+                        print(f"расхождение project_path: {item}")
+                if report.project_mismatch:
+                    logger.log(
+                        "indexer",
+                        "project_mapping_changed",
+                        status="error",
+                        error_code="project_mapping_changed",
+                        records_scanned=len(report.project_mismatch),
+                    )
                 print(
                     f"индекс: записей {store.meta_count()}, единиц FTS {store.fts_count()}, "
                     f"курсоров {len(store.cursor_all())}"
@@ -550,11 +573,46 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
     return EXIT_PROBLEMS if problems else EXIT_OK
 
 
+def cmd_re_project(config: Config, args: argparse.Namespace) -> int:
+    """Перепривязывает записи журнала к проектам по текущему маппингу (§21.4).
+
+    Административная операция: выполняется независимо от автоматических
+    режимов. Резервная копия журнала обязательна, без неё правка не
+    выполняется. Индекс после команды перестраивается заново: `project`
+    в служебном слое хранится отдельно от журнала.
+    """
+
+    from mm import reproject
+
+    memory_root = paths.config_memory_root(config)
+    logger = build_logger(config, memory_root)
+    project = None
+    if getattr(args, "project", None):
+        project, _ = resolve_project(args.project, config["project_mapping"])
+
+    result = reproject.run_reproject(memory_root, config["project_mapping"], logger, project)
+    if result.backup_dir is not None:
+        print(f"резервная копия: {result.backup_dir}")
+    print(
+        f"re-project: просмотрено записей {result.scanned}, "
+        f"перепривязано {len(result.changed)}"
+    )
+    for item in result.changed[:20]:
+        print(f"изменено: {item}")
+    for error in result.errors:
+        print(f"проблема: {error}")
+    if result.ok and result.changed:
+        with _open_store(config, memory_root) as store:
+            indexer.rebuild_index(store, memory_root, logger, project=project, config=config)
+    return EXIT_OK if result.ok else EXIT_PROBLEMS
+
+
 COMMANDS = {
     "status": cmd_status,
     "verify": cmd_verify,
     "rebuild-index": cmd_rebuild_index,
     "rebuild-digest": cmd_rebuild_digest,
+    "re-project": cmd_re_project,
     "show": cmd_show,
     "search": cmd_search,
     "compact": cmd_compact,
@@ -617,6 +675,19 @@ def build_parser() -> argparse.ArgumentParser:
         "--dry-run",
         action="store_true",
         help="только показать, что будет снято, без записи в служебный слой",
+    )
+
+    reproject_parser = subparsers.add_parser(
+        "re-project",
+        help="перепривязать записи журнала к проектам по текущему маппингу (П-16)",
+    )
+    reproject_parser.add_argument(
+        "--backup",
+        action="store_true",
+        help="уже сделанная резервная копия (по умолчанию копия создаётся всегда)",
+    )
+    reproject_parser.add_argument(
+        "--project", type=Path, default=None, help="ограничить каталогом проекта"
     )
 
     verify_parser = subparsers.add_parser("verify", help="проверка целостности и конфигурации")

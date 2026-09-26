@@ -416,6 +416,8 @@ def log_decision(
         "hook_event": "pre_llm_call",
         "hist_msgs": decision.hist_msgs,
         "hist_chars": decision.hist_chars,
+        "max_msgs": decision.max_msgs,
+        "max_chars": decision.max_chars,
         "compaction_decision": decision.decision,
         "threshold_applied": decision.threshold_applied or "none",
     }

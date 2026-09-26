@@ -384,7 +384,7 @@ class CompactionRule2Tests(CompactionTestCase):
         self.assertEqual(self.suppressed(), {unused: compaction.REASON_UNUSED})
 
     def test_rule2_requires_record_created_after_rebuild(self) -> None:
-        """Правило 2 работает только для записей, созданных после rebuilt_at."""
+        """MM-80. Правило 2 работает только для записей, созданных после rebuilt_at."""
 
         self.config["compaction_rule2_enabled"] = True
         self.set_rebuilt_at(days_ago(60))

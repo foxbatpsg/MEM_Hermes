@@ -186,6 +186,45 @@ def _open_store(config: Mapping[str, Any], memory_root: Path) -> Store | None:
         return None
 
 
+#: Префикс служебного ключа последнего отправителя сессии (П-18).
+SENDER_KEY_PREFIX = "sender:"
+
+
+def note_sender_change(
+    store: Store | None,
+    logger: Logger,
+    project: str,
+    session_id: str,
+    sender_id: str,
+) -> None:
+    """Фиксирует смену отправителя в пределах сессии (MM-161, §22).
+
+    Пустой `sender_id` события не порождает: Hermes передаёт его не всегда.
+    Без доступного служебного слоя состояние не хранится, и событие не
+    пишется — как и остальные best-effort операции захвата (§5.1).
+    """
+
+    if store is None or not sender_id:
+        return
+    key = f"{SENDER_KEY_PREFIX}{project}/{session_id}"
+    previous = store.get_meta(key)
+    if previous and previous != sender_id:
+        logger.log(
+            "capture",
+            "sender_changed",
+            status="ok",
+            session_id=session_id,
+            project=project,
+            hook_event="post_llm_call",
+            error_detail_code="sender_changed",
+        )
+    try:
+        with store.connection:
+            store.set_meta(key, sender_id)
+    except Exception:  # noqa: BLE001 - состояние отправителя не критично
+        return
+
+
 def capture_turn(
     data: TurnData,
     config: Mapping[str, Any],
@@ -345,6 +384,7 @@ def capture_turn(
             **log_fields,
         )
     else:
+        note_sender_change(store, logger, project, session_id, data.sender_id)
         existing = store.guard_get(event)
         if existing is not None:
             if existing["content_hash"] == full_hash:

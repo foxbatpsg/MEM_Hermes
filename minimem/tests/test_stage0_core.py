@@ -143,16 +143,22 @@ class ProjectTests(unittest.TestCase):
         self.assertEqual(project, "common")
         self.assertTrue(normalized)
 
-    def test_empty_cwd_gives_common(self) -> None:
-        self.assertEqual(resolve_project("", self.mapping)[0], "common")
-        self.assertEqual(resolve_project(None, self.mapping)[1], "")
+    def test_comparison_is_case_insensitive_on_windows(self) -> None:
+        """MM-93. Пути, различающиеся регистром, дают один проект."""
+
+        self.assertEqual(resolve_project("C:\\WORK\\INNER", self.mapping)[0], "inner")
 
     def test_longest_prefix_wins(self) -> None:
+        """MM-94. Вложенный каталог определяется по самому длинному префиксу."""
+
         self.assertEqual(resolve_project("C:\\work\\inner\\sub", self.mapping)[0], "inner")
         self.assertEqual(resolve_project("C:\\work\\other", self.mapping)[0], "work")
 
-    def test_comparison_is_case_insensitive_on_windows(self) -> None:
-        self.assertEqual(resolve_project("C:\\WORK\\INNER", self.mapping)[0], "inner")
+    def test_empty_cwd_gives_common(self) -> None:
+        """MM-95. При недоступном cwd используется проект `common`."""
+
+        self.assertEqual(resolve_project("", self.mapping)[0], "common")
+        self.assertEqual(resolve_project(None, self.mapping)[1], "")
 
     def test_trailing_separators_ignored(self) -> None:
         self.assertEqual(resolve_project("C:\\work\\", self.mapping)[0], "work")
