@@ -3,7 +3,7 @@
 <!-- GENERATED FILE — не редактировать вручную. Источник: corpus из governance.json. -->
 <!-- Пересборка: python -B scripts/build_refs_registry.py -->
 
-SOURCE-HASH: f4922af9fec2f008
+SOURCE-HASH: 595d86ff001063e4
 НОРМ: 0 · ОПРЕДЕЛЕНИЙ: 0 · УПОМИНАНИЙ: 0 · РАЗДЕЛОВ: 0
 
 **Как пользоваться.** `grep -n "R-001" REFS-REGISTRY.md` — все места нормы; точечный запрос: `python -B scripts/query_refs.py norm R-001`, `python -B scripts/query_refs.py section 23`.
