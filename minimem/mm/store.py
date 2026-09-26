@@ -313,6 +313,49 @@ class Store:
         ).fetchall()
         return [dict(row) for row in rows]
 
+    def meta_by_session(self, project: str, session_id: str) -> list[dict[str, Any]]:
+        """Записи сессии в порядке ходов; ключ сортировки включает event_id.
+
+        Производный `turn` (`turn_numeric IS NULL`) упорядочивается после
+        числовых, иначе порядок зависел бы от типа сортировки SQLite.
+        """
+
+        rows = self._require().execute(
+            "SELECT * FROM memory_meta WHERE project = ? AND session_id = ? "
+            "ORDER BY (turn_numeric IS NULL), turn_numeric, turn, journal_offset, event_id",
+            (project, session_id),
+        ).fetchall()
+        return [dict(row) for row in rows]
+
+    def meta_sessions(self, project: str | None = None) -> list[dict[str, Any]]:
+        """Список пар (project, session_id), представленных в индексе.
+
+        Источник списка сессий для Дайджеста и `rebuild-digest`: журнал при
+        этом не сканируется (ТЗ v1.7 §14, MM-58).
+        """
+
+        sql = "SELECT DISTINCT project, session_id FROM memory_meta"
+        params: list[Any] = []
+        if project is not None:
+            sql += " WHERE project = ?"
+            params.append(project)
+        sql += " ORDER BY project, session_id"
+        rows = self._require().execute(sql, params).fetchall()
+        return [{"project": row["project"], "session_id": row["session_id"]} for row in rows]
+
+    def body_get(self, event_id: str) -> dict[str, Any] | None:
+        """Текст записи из `memory_fts` по event_id или None.
+
+        `body_status = withheld` (П-08) даёт пустой текст: пустые строки —
+        признак отсутствия тела, а не пустой реплики.
+        """
+
+        row = self._require().execute(
+            "SELECT user_utterance, assistant_answer FROM memory_fts WHERE event_id = ?",
+            (event_id,),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
     # --- memory_fts -------------------------------------------------------
 
     def fts_upsert(self, event_id: str, user_text: str, assistant_text: str) -> None:
@@ -400,6 +443,78 @@ class Store:
 
     def clear_suppressed(self) -> None:
         self._require().execute("DELETE FROM suppressed_records")
+
+    # --- sessions ---------------------------------------------------------
+
+    def session_upsert(
+        self,
+        session_id: str,
+        project: str,
+        **fields: Any,
+    ) -> None:
+        """Создаёт или обновляет строку сессии; `None` в `fields` не пишется.
+
+        Список колонок фиксирован (§9.1): неизвестное имя приводит к
+        `TypeError`, а не к молчаливой потере значения.
+        """
+
+        allowed = (
+            "last_known_turn",
+            "max_history_len",
+            "max_msgs",
+            "max_chars",
+            "digest_file",
+            "digest_status",
+            "pending_catch_up",
+            "catch_up_target_session_id",
+            "catch_up_attempts",
+            "completed",
+            "last_seen_at",
+        )
+        unknown = set(fields) - set(allowed)
+        if unknown:
+            raise TypeError(f"Неизвестные поля sessions: {sorted(unknown)}")
+        updates = {key: value for key, value in fields.items() if value is not None}
+        self._require().execute(
+            "INSERT OR IGNORE INTO sessions (session_id, project) VALUES (?, ?)",
+            (session_id, project),
+        )
+        if not updates:
+            return
+        assignments = ", ".join(f"{key} = ?" for key in updates)
+        self._require().execute(
+            f"UPDATE sessions SET {assignments} WHERE session_id = ? AND project = ?",
+            (*updates.values(), session_id, project),
+        )
+
+    def session_get(self, session_id: str, project: str) -> dict[str, Any] | None:
+        row = self._require().execute(
+            "SELECT * FROM sessions WHERE session_id = ? AND project = ?",
+            (session_id, project),
+        ).fetchone()
+        return dict(row) if row is not None else None
+
+    def sessions_all(self, project: str | None = None) -> list[dict[str, Any]]:
+        """Строки `sessions`; без `project` — по всем проектам (§9.1)."""
+
+        sql = "SELECT * FROM sessions"
+        params: list[Any] = []
+        if project is not None:
+            sql += " WHERE project = ?"
+            params.append(project)
+        sql += " ORDER BY project, session_id"
+        rows = self._require().execute(sql, params).fetchall()
+        return [dict(row) for row in rows]
+
+    def session_by_digest_file(self, digest_file: str) -> list[dict[str, Any]]:
+        """Сессии, отображающиеся в указанный файл дайджеста (П-12)."""
+
+        rows = self._require().execute(
+            "SELECT session_id, project, digest_file FROM sessions "
+            "WHERE digest_file = ? ORDER BY project, session_id",
+            (digest_file,),
+        ).fetchall()
+        return [dict(row) for row in rows]
 
     # --- usage_counters ---------------------------------------------------
 

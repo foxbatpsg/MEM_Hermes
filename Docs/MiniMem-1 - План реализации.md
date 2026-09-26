@@ -197,6 +197,8 @@ C:\Projects\MEM_Hermes\minimem\
 
 ### Этап 3. Дайджест
 
+Статус: выполнен 2026-09-26. Созданы `mm/digest.py` (имя файла по П-12, заголовок §14, санитизация §13.1, лимит `max_digest_chars`, исключение снятых записей, разбор заголовка, `verify_digests`, `rebuild_digests`), `hooks/session_end.py`; в `mm/store.py` добавлены выборки `meta_by_session`, `meta_sessions`, `body_get` и работа с таблицей `sessions` (`session_upsert`, `session_get`, `sessions_all`, `session_by_digest_file`); в `minimem.py` добавлена команда `rebuild-digest` (`--session`, `--all`, `--project`) и проверка дайджестов в `verify`. Прогон тестов — 146 (40 этапа 0 + 54 этапа 1 + 20 этапа 2 + 32 этапа 3), OK. Проверено на реальном журнале: 4 сессии, 4 файла дайджеста, максимальный размер 1500 символов при `max_digest_chars = 1500`, `verify` — без проблем. Уплотнение (этап 6) не выполняется; механизм снятия записей используется только как источник exclusion state. Регистрация `session_end.py` в Hermes и allowlist не выполнена — только подготовлено.
+
 Цель: детерминированная выжимка последних ходов сессии.
 
 Что делаем:
@@ -211,6 +213,8 @@ C:\Projects\MEM_Hermes\minimem\
 
 Файлы:
 - `mm/digest.py`
+- `hooks/session_end.py`
+- расширение `mm/store.py`
 - расширение `minimem.py`
 
 Критерий готовности:
@@ -221,7 +225,8 @@ C:\Projects\MEM_Hermes\minimem\
 - поле `Создан` записывается в ISO-8601 с offset.
 
 Тесты ТЗ:
-- 31, 32, 33.
+- 31, 32, 33;
+- MM-58, MM-92, MM-146, MM-147, MM-159, MM-164.
 
 ### Этап 4. Возврат и хук pre_llm_call
 

@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mm import MINIMEM_VERSION, indexer, paths  # noqa: E402
+from mm import MINIMEM_VERSION, digest, indexer, paths  # noqa: E402
 from mm.config import Config, ConfigError, load_config  # noqa: E402
 from mm.log import Logger  # noqa: E402
 from mm.project import current_cwd, resolve_project  # noqa: E402
@@ -152,6 +152,56 @@ def cmd_rebuild_index(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK if result.ok else EXIT_PROBLEMS
 
 
+def cmd_rebuild_digest(config: Config, args: argparse.Namespace) -> int:
+    """Пересоздаёт файлы дайджестов из журнала (§14, §21.5).
+
+    Административная операция: выполняется независимо от автоматических
+    режимов. Поле «Последний ход» при пересборке не меняется (§11.1, П-07).
+    """
+
+    memory_root = paths.config_memory_root(config)
+    logger = build_logger(config, memory_root)
+    project = None
+    if getattr(args, "project", None):
+        project, _ = resolve_project(args.project, config["project_mapping"])
+
+    try:
+        store = _open_store(config, memory_root)
+    except StoreUnavailable as exc:
+        print(f"проблема: SQLite недоступен ({exc})")
+        return EXIT_PROBLEMS
+
+    with store:
+        results = digest.rebuild_digests(
+            store,
+            config,
+            memory_root,
+            logger,
+            session_id=args.session,
+            all_sessions=args.all,
+            project=project,
+        )
+
+    if not results:
+        print("rebuild-digest: подходящих сессий в индексе нет")
+        return EXIT_PROBLEMS
+
+    failures = 0
+    for result in results:
+        if result.status == "ok":
+            print(
+                f"{result.project}/{result.session_id}: {result.file}, "
+                f"{result.chars} символов, ходов {result.turns_included} из {result.turns_total}"
+            )
+        elif result.status == "empty":
+            print(f"{result.project}/{result.session_id}: записей нет, дайджест не создан")
+        else:
+            failures += 1
+            print(f"проблема: {result.project}/{result.session_id}: {result.error}")
+    print(f"итог: обработано {len(results)}, ошибок {failures}")
+    return EXIT_PROBLEMS if failures else EXIT_OK
+
+
 def cmd_show(config: Config, args: argparse.Namespace) -> int:
     """Показывает оригинальную запись журнала по event_id (§21.5)."""
 
@@ -282,6 +332,11 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
                     f"индекс: записей {store.meta_count()}, единиц FTS {store.fts_count()}, "
                     f"курсоров {len(store.cursor_all())}"
                 )
+                digests = digest.verify_digests(store, memory_root, logger, config, project)
+                notes.extend(digests.notes)
+                problems.extend(digests.problems)
+                for item in (digests.damaged + digests.missing + digests.collisions)[:10]:
+                    print(f"дайджест: {item}")
 
     logger.log(
         "cli",
@@ -304,6 +359,7 @@ COMMANDS = {
     "status": cmd_status,
     "verify": cmd_verify,
     "rebuild-index": cmd_rebuild_index,
+    "rebuild-digest": cmd_rebuild_digest,
     "show": cmd_show,
 }
 
@@ -327,6 +383,15 @@ def build_parser() -> argparse.ArgumentParser:
 
     rebuild = subparsers.add_parser("rebuild-index", help="пересоздать индекс из журнала")
     rebuild.add_argument("--project", type=Path, default=None, help="ограничить проектом")
+
+    rebuild_digest = subparsers.add_parser(
+        "rebuild-digest", help="пересоздать файл дайджеста из журнала"
+    )
+    rebuild_digest.add_argument("--session", default=None, help="session_id для пересборки")
+    rebuild_digest.add_argument(
+        "--all", action="store_true", help="пересобрать дайджесты всех сессий"
+    )
+    rebuild_digest.add_argument("--project", type=Path, default=None, help="ограничить проектом")
 
     show = subparsers.add_parser("show", help="показать запись журнала по event_id")
     show.add_argument("event_id")
