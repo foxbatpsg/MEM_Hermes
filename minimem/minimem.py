@@ -19,10 +19,11 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mm import MINIMEM_VERSION, paths  # noqa: E402
+from mm import MINIMEM_VERSION, indexer, paths  # noqa: E402
 from mm.config import Config, ConfigError, load_config  # noqa: E402
 from mm.log import Logger  # noqa: E402
 from mm.project import current_cwd, resolve_project  # noqa: E402
+from mm.store import Store, StoreUnavailable  # noqa: E402
 
 EXIT_OK = 0
 EXIT_PROBLEMS = 1
@@ -117,6 +118,63 @@ def _writable(directory: Path) -> str:
     return "да"
 
 
+def _open_store(config: Config, memory_root: Path) -> Store:
+    """Открывает служебный слой; при отказе — диагностика, а не исключение (§19.2)."""
+
+    store = Store(paths.sqlite_path(memory_root, config["sqlite_filename"]))
+    store.create_schema()
+    return store
+
+
+def cmd_rebuild_index(config: Config, args: argparse.Namespace) -> int:
+    """Полностью пересоздаёт индекс из журнала (§4.3, §21.5)."""
+
+    memory_root = paths.config_memory_root(config)
+    logger = build_logger(config, memory_root)
+    project = None
+    if getattr(args, "project", None):
+        project, _ = resolve_project(args.project, config["project_mapping"])
+    try:
+        store = _open_store(config, memory_root)
+    except StoreUnavailable as exc:
+        print(f"проблема: SQLite недоступен ({exc})")
+        return EXIT_PROBLEMS
+    with store:
+        result = indexer.rebuild_index(store, memory_root, logger, project=project)
+    print(
+        f"rebuild-index: проиндексировано {result.records_indexed}, "
+        f"заменено ревизий {result.revisions}, дублей {result.duplicates}, "
+        f"повреждено пропущено {result.records_damaged}, курсоров сброшено "
+        f"{result.cursor_resets}, {result.duration_ms} мс"
+    )
+    for error in result.errors:
+        print(f"проблема: {error}")
+    return EXIT_OK if result.ok else EXIT_PROBLEMS
+
+
+def cmd_show(config: Config, args: argparse.Namespace) -> int:
+    """Показывает оригинальную запись журнала по event_id (§21.5)."""
+
+    from mm import journal as journal_module
+
+    memory_root = paths.config_memory_root(config)
+    for path in paths.existing_journal_files(memory_root):
+        records, _ = journal_module.read_records(path)
+        for record in records:
+            if record.event_id != args.event_id:
+                continue
+            key = paths.relative_to_root(path, memory_root)
+            print(f"# {key}@{record.offset}")
+            print(f"# turn={record.turn} session={record.session_id} revision={record.revision}")
+            print(f"# content_hash={record.content_hash} truncated={record.metadata.get('truncated')}")
+            print(f"### User\n{record.user_utterance}")
+            print(f"### Assistant\n{record.assistant_answer}")
+            return EXIT_OK
+    print(f"проблема: запись {args.event_id} не найдена в журнале")
+    return EXIT_PROBLEMS
+
+
+
 def cmd_status(config: Config, args: argparse.Namespace) -> int:
     """Путь журнала, число файлов, состояние SQLite, активные режимы (§21)."""
 
@@ -160,10 +218,10 @@ def cmd_status(config: Config, args: argparse.Namespace) -> int:
 
 
 def cmd_verify(config: Config, args: argparse.Namespace) -> int:
-    """Проверки этапа 0: конфигурация, доступность журнала, состояние SQLite.
+    """Проверки этапов 0 и 2: конфигурация, журнал, SQLite, соответствие индекса.
 
-    Проверки соответствия журнала и индекса появляются на этапе 2 вместе
-    с `mm/indexer.py` (ТЗ v1.7 §21.5).
+    Проверки по §21.5: доступность журнала и SQLite, записи журнала,
+    отсутствующие в индексе, дубликаты, повреждения, курсоры, content_hash.
     """
 
     memory_root = paths.config_memory_root(config)
@@ -193,12 +251,37 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
     )
 
     state, detail = sqlite_state(sqlite_file)
-    if state in ("ok", "missing"):
-        notes.append(
-            f"SQLite: {state} ({detail}) — производный слой, наполняется rebuild-index на этапе 2"
-        )
-    else:
+    if state == "damaged":
         problems.append(f"SQLite: {state} ({detail})")
+    else:
+        notes.append(f"SQLite: {state} ({detail})")
+
+    if state == "missing" or not sqlite_file.is_file():
+        notes.append("индекс отсутствует: запустите minimem rebuild-index")
+    else:
+        project = None
+        if getattr(args, "projects", False):
+            project, _ = resolve_project(current_cwd(), config["project_mapping"])
+        try:
+            store = _open_store(config, memory_root)
+        except StoreUnavailable as exc:
+            problems.append(f"SQLite недоступен для проверки индекса ({exc})")
+            store = None
+        if store is not None:
+            with store:
+                report = indexer.verify(store, memory_root, logger, project=project)
+                notes.extend(report.notes)
+                problems.extend(report.problems)
+                for item in report.missing_in_index[:10]:
+                    print(f"нет в индексе: {item}")
+                for item in report.duplicates[:10]:
+                    print(f"дубль: {item}")
+                for item in report.bad_cursors[:10]:
+                    print(f"курсор: {item}")
+                print(
+                    f"индекс: записей {store.meta_count()}, единиц FTS {store.fts_count()}, "
+                    f"курсоров {len(store.cursor_all())}"
+                )
 
     logger.log(
         "cli",
@@ -213,16 +296,15 @@ def cmd_verify(config: Config, args: argparse.Namespace) -> int:
         print(f"ok: {note}")
     for problem in problems:
         print(f"проблема: {problem}")
-    print(
-        f"итог: {'проблемы' if problems else 'без проблем'}; "
-        "проверки этапа 2 (соответствие журнала и индекса) ещё не реализованы"
-    )
+    print(f"итог: {'проблемы' if problems else 'без проблем'}")
     return EXIT_PROBLEMS if problems else EXIT_OK
 
 
 COMMANDS = {
     "status": cmd_status,
     "verify": cmd_verify,
+    "rebuild-index": cmd_rebuild_index,
+    "show": cmd_show,
 }
 
 
@@ -242,11 +324,18 @@ def build_parser() -> argparse.ArgumentParser:
     )
     subparsers = parser.add_subparsers(dest="command", required=True)
     subparsers.add_parser("status", help="путь журнала, число файлов, SQLite, режимы")
+
+    rebuild = subparsers.add_parser("rebuild-index", help="пересоздать индекс из журнала")
+    rebuild.add_argument("--project", type=Path, default=None, help="ограничить проектом")
+
+    show = subparsers.add_parser("show", help="показать запись журнала по event_id")
+    show.add_argument("event_id")
+
     verify_parser = subparsers.add_parser("verify", help="проверка целостности и конфигурации")
     verify_parser.add_argument(
         "--projects",
         action="store_true",
-        help="проекты с несоответствием project_path (реализуется на этапе 2, П-16)",
+        help="ограничить проверку текущим проектом (П-16)",
     )
     return parser
 

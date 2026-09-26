@@ -51,6 +51,7 @@ class ParsedRecord:
     damaged_reason: str = ""
     metadata_error: str = ""
     raw: str = ""
+    end_offset: int = 0
 
     @property
     def is_damaged(self) -> bool:
@@ -268,6 +269,8 @@ def parse_records(text: str, offsets: list[int] | None = None) -> tuple[list[Par
             continue
 
         if line == END_MARKER and state == "INSIDE" and current is not None:
+            # Конец записи — сразу за маркером и переводом строки.
+            current.end_offset = line_offset + len(line.encode("utf-8")) + 1
             _finish_record(current, buffer, records, damaged)
             state = "OUTSIDE"
             current = None

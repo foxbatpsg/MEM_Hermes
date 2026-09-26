@@ -16,9 +16,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mm import capture, paths  # noqa: E402
+from mm import capture, indexer, paths  # noqa: E402
 from mm.config import ConfigError, default_config_path, load_config  # noqa: E402
 from mm.log import Logger  # noqa: E402
+from mm.store import Store, StoreUnavailable  # noqa: E402
 
 #: Переменная окружения с путём к конфигурации (используется в тестах).
 CONFIG_ENV = "MINIMEM_CONFIG"
@@ -87,6 +88,17 @@ def main() -> int:
         capture.capture_turn(turn_from_event(event), config, logger, memory_root)
     except Exception as exc:  # noqa: BLE001 - граница хука (§19.2)
         logger.error("capture", "capture_failed", type(exc).__name__, hook_event="post_llm_call")
+
+    # Захват и Индексатор — два независимых запуска: индекс читает журнал (§2).
+    try:
+        store = Store(paths.sqlite_path(memory_root, config["sqlite_filename"]))
+        store.create_schema()
+        with store:
+            indexer.index_project(store, memory_root, logger)
+    except Exception as exc:  # noqa: BLE001 - ошибка индексатора не мешает Hermes
+        logger.error(
+            "indexer", "indexer_failed", type(exc).__name__, hook_event="post_llm_call"
+        )
 
     print("{}")
     return 0

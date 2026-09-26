@@ -157,6 +157,15 @@ C:\Projects\MEM_Hermes\minimem\
 
 ### Этап 2. Индексатор и служебный слой
 
+Статус: выполнен 2026-09-26. Расширен `mm/store.py` полной схемой §9.1
+(`memory_fts`, `memory_meta` с тремя индексами, `usage_counters`, `suppressed_records`,
+`sessions`, `session_returns`, `journal_cursors`, `meta`; `schema_version = 2`), создан
+`mm/indexer.py` (инкрементальная индексация, курсоры, дубликаты, ревизии, `rebuild_index`,
+`verify`), расширен CLI (`rebuild-index`, `show`, полный `verify`), в `hooks/post_llm.py`
+добавлен запуск Индексатора отдельным проходом после Захвата. Прогон тестов — 114
+(40 этапа 0 + 54 этапа 1 + 20 этапа 2), OK. Проверено на реальном журнале: 8 записей,
+`rebuild-index` и `verify` — без проблем.
+
 Цель: SQLite/FTS5 как производный слой с инкрементальной индексацией и самовосстановлением.
 
 Что делаем:
