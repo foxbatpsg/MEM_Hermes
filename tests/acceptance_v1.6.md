@@ -4,12 +4,12 @@
 Номера берутся из `tests/required_tests.txt`, статусы — из фактического
 прогона тестов и чтения docstring проверок.
 
-Сформирован: 2026-09-26T18:20:40+04:00
+Сформирован: 2026-09-26T18:59:55+04:00
 
 ## Итог прогона
 
-- тестов выполнено: 341;
-- успешно: 338;
+- тестов выполнено: 348;
+- успешно: 345;
 - пропущено: 3 (установочные тесты Hermes).
 
 ## Статусы номеров
@@ -153,7 +153,7 @@
 | 135 | пройден | test_capture.py::RedactionTests (setUp, test_85_typical_api_keys_replaced, test_85b_bearer_jwt_pem_connection_string, test_85c_key_value_forms, test_86_plain_word_password_is_kept, test_106_placeholder_is_deterministic, test_107_same_secret_same_hash, test_89_no_secret_fragments_in_log, _with_broken_redaction, test_134_redaction_failure_withholds_body, test_135_redaction_timeout_withholds_body, test_136_traceback_not_in_main_log), test_capture.py::test_135_redaction_timeout_withholds_body |
 | 136 | пройден | test_capture.py::test_136_traceback_not_in_main_log |
 | 137 | пройден | test_capture.py::DerivedIdentityTests (setUp, test_137_missing_turn_id_still_saved, test_138_turn_counters_present_in_log, test_missing_session_id_uses_unknown_prefix, test_normal_turn_source_is_hermes), test_capture.py::test_137_missing_turn_id_still_saved |
-| 138 | пройден | test_capture.py::DerivedIdentityTests (setUp, test_137_missing_turn_id_still_saved, test_138_turn_counters_present_in_log, test_missing_session_id_uses_unknown_prefix, test_normal_turn_source_is_hermes), test_capture.py::test_138_turn_counters_present_in_log |
+| 138 | пройден | test_capture.py::DerivedIdentityTests (setUp, test_137_missing_turn_id_still_saved, test_138_turn_counters_present_in_log, test_missing_session_id_uses_unknown_prefix, test_normal_turn_source_is_hermes), test_capture.py::test_138_turn_counters_present_in_log, test_revision_numbers.py::test_138_counters_present_on_empty_event_too |
 | 139 | пройден | test_revision_numbers.py::test_139_verify_lists_records_with_derived_turn |
 | 140 | пройден | test_stage8.py::StatsTests (test_counts_all_normative_metrics, test_distinguishes_no_hits_from_error, test_search_log_carries_measurement_contract, test_project_filter, test_period_filter, test_broken_log_lines_are_skipped, test_json_output_has_all_sections), test_stage8.py::test_counts_all_normative_metrics |
 | 141 | пройден | test_stage8.py::test_search_log_carries_measurement_contract |

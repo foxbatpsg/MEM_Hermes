@@ -194,6 +194,7 @@ class StatsReport:
     turns_captured: int = 0
     turns_skipped: int = 0
     turns_derived: int = 0
+    empty_events: int = 0
     truncations: int = 0
     redactions: int = 0
     duplicates: int = 0
@@ -256,6 +257,7 @@ class StatsReport:
                 "turns_captured": self.turns_captured,
                 "turns_skipped": self.turns_skipped,
                 "turns_derived": self.turns_derived,
+                "empty_events": self.empty_events,
                 "truncations": self.truncations,
                 "redactions": self.redactions,
                 "duplicates": self.duplicates,
@@ -316,7 +318,7 @@ class StatsReport:
                 f"turns_skipped {self.turns_skipped}, "
                 f"turns_derived {self.turns_derived}, обрезок {self.truncations}, "
                 f"redaction {self.redactions}, дублей {self.duplicates}, "
-                f"body withheld {self.withheld}",
+                f"body withheld {self.withheld}, пустых событий {self.empty_events}",
                 f"индексатор: проходов {self.indexer_runs}, проиндексировано "
                 f"{self.records_indexed}, сбросов курсора {self.cursor_resets}, "
                 f"повреждённых записей {self.records_damaged}",
@@ -421,6 +423,9 @@ def collect(
             report.turns_captured += as_int(record, "turns_captured")
             report.turns_skipped += as_int(record, "turns_skipped")
             report.turns_derived += as_int(record, "turns_derived")
+            # Пустые служебные события Hermes считаются отдельно: хода не было,
+            # терять нечего, и в `turns_skipped` им не место (RB-16).
+            report.empty_events += as_int(record, "empty_events")
             if operation == "record_truncated_to_limit":
                 report.truncations += 1
             if operation == "record_body_withheld_redaction_failed":

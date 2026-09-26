@@ -251,6 +251,10 @@ def capture_turn(
         return result
 
     if data.is_empty:
+        # Событие без реплики и без ответа — это не неразбираемый ход, а
+        # отсутствие хода (§3.1 п. 14). Считать его пропуском нельзя: терять
+        # нечего, а `turns_skipped` должен показывать только настоящую потерю
+        # рабочего хода (критерий §25 п. 27, RB-16).
         result.status = "skipped"
         result.operation = "capture_invalid_event"
         logger.log(
@@ -258,9 +262,13 @@ def capture_turn(
             "capture_invalid_event",
             status="skipped",
             error_code="empty_turn",
-            turns_seen=1,
+            empty_events=1,
+            # Счётчики присутствуют в каждом запуске Захвата (MM-138), но
+            # остаются нулевыми: хода не было, терять нечего.
+            turns_seen=0,
             turns_captured=0,
-            turns_skipped=1,
+            turns_skipped=0,
+            turns_derived=0,
         )
         return result
 
@@ -431,7 +439,15 @@ def capture_turn(
     except journal.JournalLockTimeout:
         result.status = "error"
         result.operation = "journal_lock_timeout"
-        logger.error("journal", "journal_lock_timeout", "journal_lock_timeout", **log_fields)
+        # Ход не записан — это настоящая потеря, и счётчики обязаны её показать
+        # (§25 п. 27). Иначе отчёт сообщил бы об успехе там, где запись
+        # потеряна (RB-16).
+        logger.error(
+            "journal",
+            "journal_lock_timeout",
+            "journal_lock_timeout",
+            **{**log_fields, "turns_captured": 0, "turns_skipped": 1},
+        )
         if owned_store and store is not None:
             store.close()
         return result
@@ -444,7 +460,7 @@ def capture_turn(
             type(exc).__name__,
             project=project,
             event_id=event,
-            **log_fields,
+            **{**log_fields, "turns_captured": 0, "turns_skipped": 1},
         )
         if owned_store and store is not None:
             store.close()

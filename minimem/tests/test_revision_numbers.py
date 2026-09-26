@@ -39,6 +39,7 @@ from mm import (  # noqa: E402
     ret,
     search,
     session,
+    stats,
 )
 from mm.config import DEFAULTS, config_hash, load_config, validate  # noqa: E402
 from mm.log import Logger  # noqa: E402
@@ -72,11 +73,15 @@ def make_store(tmp: str) -> Store:
     return store
 
 
-def log_operations(tmp: str) -> list[str]:
+def log_records(tmp: str) -> list[dict]:
     log = Path(tmp) / "logs" / "minimem.log"
     if not log.exists():
         return []
-    return [json.loads(line)["operation"] for line in log.read_text("utf-8").splitlines()]
+    return [json.loads(line) for line in log.read_text("utf-8").splitlines()]
+
+
+def log_operations(tmp: str) -> list[str]:
+    return [record["operation"] for record in log_records(tmp)]
 
 
 def write_config(root: Path, config: dict) -> Path:
@@ -989,4 +994,125 @@ class SenderChangeTests(RevisionTestCase):
 
 if __name__ == "__main__":  # pragma: no cover
     unittest.main()
+
+
+
+class TurnCountersHonestTests(RevisionTestCase):
+    """RB-16: счётчики `turns_*` показывают настоящую потерю ходов.
+
+    Основание: §19.5 (контракт измеримости, П-10), §25 критерий 27
+    (`turns_skipped = 0` как доказательство, что рабочий ход не потерян),
+    §3.1 п. 14 (пустое событие — не неразбираемый ход).
+    """
+
+    def _write_turn(self, tmp: str, user: str = "реплика хода", answer: str = "ответ хода"):
+        return capture.capture_turn(
+            capture.TurnData(
+                user_message=user,
+                assistant_response=answer,
+                session_id=SESSION,
+                task_id="task_1",
+                turn_id="1",
+                cwd=CWD,
+            ),
+            make_config(tmp),
+            make_logger(tmp),
+            Path(tmp),
+            moment=MOMENT,
+        )
+
+    def _counters(self, tmp: str) -> dict:
+        """Счётчики последней записи лога захвата."""
+
+        for record in reversed(log_records(tmp)):
+            if "turns_seen" in record or "empty_events" in record:
+                return {
+                    key: record.get(key, 0)
+                    for key in ("turns_seen", "turns_captured", "turns_skipped", "empty_events")
+                }
+        raise AssertionError("в логе нет записи захвата")
+
+    def _fail_append(self, error: Exception) -> None:
+        original = journal.append_record
+
+        def broken(*args, **kwargs):
+            raise error
+
+        journal.append_record = broken
+        self.addCleanup(setattr, journal, "append_record", original)
+
+    def test_empty_event_is_not_counted_as_skipped_turn(self) -> None:
+        """RB-16. Пустое событие не попадает в `turns_skipped`."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_turn(tmp, user="", answer="")
+            counters = self._counters(tmp)
+        self.assertEqual(counters["empty_events"], 1)
+        self.assertEqual(counters["turns_seen"], 0)
+        self.assertEqual(counters["turns_skipped"], 0)
+
+    def test_append_failure_counts_as_lost_turn(self) -> None:
+        """RB-16. Отказ записи в журнал виден как потерянный ход."""
+
+        self._fail_append(OSError("диск недоступен"))
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._write_turn(tmp)
+            counters = self._counters(tmp)
+        self.assertEqual(result.operation, "journal_append_failed")
+        self.assertEqual(counters["turns_captured"], 0)
+        self.assertEqual(counters["turns_skipped"], 1)
+
+    def test_lock_timeout_counts_as_lost_turn(self) -> None:
+        """RB-16. Недоступная блокировка журнала видна как потерянный ход."""
+
+        self._fail_append(journal.JournalLockTimeout("блокировка не получена"))
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._write_turn(tmp)
+            counters = self._counters(tmp)
+        self.assertEqual(result.operation, "journal_lock_timeout")
+        self.assertEqual(counters["turns_captured"], 0)
+        self.assertEqual(counters["turns_skipped"], 1)
+
+    def test_successful_capture_still_counts_as_captured(self) -> None:
+        """RB-16. Штатный ход остаётся в `turns_captured`."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._write_turn(tmp)
+            counters = self._counters(tmp)
+        self.assertTrue(result.written)
+        self.assertEqual(counters["turns_seen"], 1)
+        self.assertEqual(counters["turns_captured"], 1)
+        self.assertEqual(counters["turns_skipped"], 0)
+
+    def test_duplicate_delivery_is_not_a_loss(self) -> None:
+        """RB-16. Повторная доставка того же хода потерей не считается."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            self._write_turn(tmp)
+            again = self._write_turn(tmp)
+            counters = self._counters(tmp)
+        self.assertEqual(again.operation, "capture_duplicate_ignored")
+        self.assertEqual(counters["turns_skipped"], 0)
+
+    def test_138_counters_present_on_empty_event_too(self) -> None:
+        """MM-138. Счётчики присутствуют и в логе запуска с пустым событием."""
+
+        self._write_turn(self.tmp, user="", answer="")
+        payload = log_records(self.tmp)[-1]
+        for field in ("turns_seen", "turns_captured", "turns_skipped", "turns_derived"):
+            self.assertIn(field, payload)
+        self.assertEqual(payload["empty_events"], 1)
+
+    def test_stats_reports_empty_events_separately(self) -> None:
+        """RB-16. `stats` показывает пустые события отдельной строкой."""
+
+        with tempfile.TemporaryDirectory() as tmp:
+            for _ in range(2):
+                self._write_turn(tmp, user="", answer="")
+            self._write_turn(tmp)
+            report = stats.collect(log_records(tmp), config=make_config(tmp))
+        self.assertEqual(report.empty_events, 2)
+        self.assertEqual(report.turns_skipped, 0)
+        self.assertEqual(report.turns_captured, 1)
+        self.assertIn("пустых событий 2", report.render())
 
