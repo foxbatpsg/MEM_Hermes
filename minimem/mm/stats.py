@@ -17,20 +17,30 @@ from datetime import date, datetime, time, timezone
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
-#: Операции, которые считаются запуском поиска (§19.5).
-SEARCH_OPERATIONS = frozenset({"search_completed", "search_skipped"})
+#: Операции, которые считаются запуском поиска (§19.5, §21.3).
+#: `search_injected` — успешная вставка, `search_completed` — поиск состоялся,
+#: но вставлять нечего, `search_skipped` — поиск не запускался (первый ход,
+#: ход Возврата, нулевые термины).
+SEARCH_OPERATIONS = frozenset(
+    {"search_injected", "search_completed", "search_skipped"}
+)
 
 #: Операции захвата, по которым суммируются счётчики ходов (§19.5).
+#: `capture_record_written` — успешная запись в журнал: без неё в отчёте
+#: `turns_captured` всегда был бы нулём.
 CAPTURE_OPERATIONS = frozenset(
     {
-        "capture",
+        "capture_record_written",
         "capture_disabled",
         "capture_invalid_event",
         "capture_duplicate_ignored",
         "capture_event_conflict",
         "capture_event_revision_added",
         "capture_turn_derived",
+        "capture_idempotency_guard_unavailable",
         "record_truncated_to_limit",
+        "record_body_withheld_redaction_failed",
+        "insert_stripped",
         "redaction_applied",
     }
 )
@@ -186,6 +196,7 @@ class StatsReport:
     truncations: int = 0
     redactions: int = 0
     duplicates: int = 0
+    withheld: int = 0
     # Индексатор.
     indexer_runs: int = 0
     records_indexed: int = 0
@@ -247,6 +258,7 @@ class StatsReport:
                 "truncations": self.truncations,
                 "redactions": self.redactions,
                 "duplicates": self.duplicates,
+                "body_withheld": self.withheld,
             },
             "indexer": {
                 "runs": self.indexer_runs,
@@ -302,7 +314,8 @@ class StatsReport:
                 f"turns_captured {self.turns_captured}, "
                 f"turns_skipped {self.turns_skipped}, "
                 f"turns_derived {self.turns_derived}, обрезок {self.truncations}, "
-                f"redaction {self.redactions}, дублей {self.duplicates}",
+                f"redaction {self.redactions}, дублей {self.duplicates}, "
+                f"body withheld {self.withheld}",
                 f"индексатор: проходов {self.indexer_runs}, проиндексировано "
                 f"{self.records_indexed}, сбросов курсора {self.cursor_resets}, "
                 f"повреждённых записей {self.records_damaged}",
@@ -409,6 +422,8 @@ def collect(
             report.turns_derived += as_int(record, "turns_derived")
             if operation == "record_truncated_to_limit":
                 report.truncations += 1
+            if operation == "record_body_withheld_redaction_failed":
+                report.withheld += 1
             if operation == "redaction_applied" or as_int(record, "redaction_count"):
                 report.redactions += max(1, as_int(record, "redaction_count"))
             if operation in (

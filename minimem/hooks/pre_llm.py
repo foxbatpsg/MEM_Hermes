@@ -192,7 +192,25 @@ def handle_turn(
     return result
 
 
+def _log_duration(logger: Logger, config, started: float, status: str) -> None:
+    """Задержка хука в лог: §22 (`duration_ms`) и §21.3 (p50/p95/max по хукам).
+
+    Без этой строки в отчёте `stats` задержки всегда нулевые: ни один модуль
+    не пишет `duration_ms` сам, а измерять должен хук целиком.
+    """
+
+    logger.log(
+        "hook",
+        "hook_completed",
+        status=status,
+        hook_event="pre_llm_call",
+        duration_ms=int((time.monotonic() - started) * 1000),
+        deadline_remaining_ms=deadline_remaining(config, started),
+    )
+
+
 def main() -> int:
+    started = time.monotonic()
     try:
         event = read_event(sys.stdin)
     except Exception:  # noqa: BLE001 - хук не имеет права упасть (§19.2)
@@ -210,9 +228,11 @@ def main() -> int:
         result = handle_turn(event, config, memory_root, logger)
     except Exception as exc:  # noqa: BLE001 - граница хука (§19.2)
         logger.error("hook", "return_failed", type(exc).__name__, hook_event="pre_llm_call")
+        _log_duration(logger, config, started, "error")
         print("{}")
         return 0
 
+    _log_duration(logger, config, started, "ok")
     if result.inserted:
         print(json.dumps({"context": result.text}, ensure_ascii=False))
     else:

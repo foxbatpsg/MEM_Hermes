@@ -409,6 +409,28 @@ def log_entry(operation: str, **fields) -> dict:
     return record
 
 
+def search_operations_in_source() -> set[str]:
+    """Операции из реальных вызовов `log_search` в `mm/search.py`."""
+
+    import re
+
+    source = (CODE_DIR / "mm" / "search.py").read_text(encoding="utf-8")
+    return set(re.findall(r"log_search\(\s*logger,\s*\"([a-z_]+)\"", source))
+
+
+def capture_operations_in_source() -> set[str]:
+    """Операции Захвата: вызовы `logger.log("capture", ...)` и значения операции."""
+
+    import re
+
+    source = (CODE_DIR / "mm" / "capture.py").read_text(encoding="utf-8")
+    called = re.findall(
+        r"logger\.(?:log|error)\(\s*\n?\s*\"capture\",\s*\n?\s*\"([a-z_]+)\"", source
+    )
+    assigned = re.findall(r"(?:operation: str|operation) = \"(capture_[a-z_]+)\"", source)
+    return set(called) | set(assigned)
+
+
 def synthetic_log() -> list[dict]:
     """Синтетический лог со всеми группами метрик нормативного списка §21.3."""
 
@@ -445,7 +467,7 @@ def synthetic_log() -> list[dict]:
             search_returned=0,
         ),
         log_entry(
-            "capture",
+            "capture_record_written",
             project="common",
             duration_ms=40,
             turns_seen=1,
@@ -455,6 +477,11 @@ def synthetic_log() -> list[dict]:
             redaction_count=1,
         ),
         log_entry("record_truncated_to_limit", project="common", truncation_fields="user"),
+        log_entry(
+            "record_body_withheld_redaction_failed",
+            project="common",
+            error_code="redaction_failed",
+        ),
         log_entry("capture_duplicate_ignored", project="common"),
         log_entry("cursor_reset", project="common"),
         log_entry("journal_record_damaged", project="common"),
@@ -480,7 +507,7 @@ class StatsTests(unittest.TestCase):
         """MM-140. Все метрики нормативного списка считаются на синтетическом логе."""
 
         report = stats.collect(synthetic_log(), config=dict(DEFAULTS))
-        self.assertEqual(report.records_total, 15)
+        self.assertEqual(report.records_total, 16)
         self.assertEqual(report.search_runs, 3)
         self.assertEqual(report.search_empty, 1)
         self.assertEqual(report.search_no_hits, 1)
@@ -496,6 +523,7 @@ class StatsTests(unittest.TestCase):
         self.assertEqual(report.turns_seen, 1)
         self.assertEqual(report.turns_captured, 1)
         self.assertEqual(report.truncations, 1)
+        self.assertEqual(report.withheld, 1)
         self.assertEqual(report.redactions, 1)
         self.assertEqual(report.duplicates, 1)
         self.assertEqual(report.indexer_runs, 1)
@@ -612,6 +640,62 @@ class StatsTests(unittest.TestCase):
         ):
             self.assertIn(section, data)
         json.dumps(data, ensure_ascii=False)
+
+
+class StatsCoverageTests(unittest.TestCase):
+    """Перечни `stats` покрывают реальные операции модулей (§21.3).
+
+    Найдено на rollout: операции `search_injected` и `capture_record_written`
+    не были в перечнях, поэтому на живом логе `stats` показывал нулевые
+    запуски поиска и нулевые записанные ходы. Тест не даёт этому повториться.
+    """
+
+    def test_search_operations_are_counted(self) -> None:
+        operations = search_operations_in_source()
+        self.assertIn("search_injected", operations)
+        self.assertTrue(operations)
+        missing = operations - stats.SEARCH_OPERATIONS
+        self.assertEqual(missing, set(), f"операции поиска вне перечня stats: {missing}")
+
+    def test_capture_operations_are_counted(self) -> None:
+        operations = capture_operations_in_source()
+        self.assertIn("capture_record_written", operations)
+        self.assertTrue(operations)
+        missing = operations - stats.CAPTURE_OPERATIONS
+        self.assertEqual(missing, set(), f"операции захвата вне перечня stats: {missing}")
+
+    def test_injected_search_counts_as_run(self) -> None:
+        """Успешная вставка — это состоявшийся запуск поиска."""
+
+        record = log_entry(
+            "search_injected",
+            project="common",
+            search_terms=4,
+            search_hits=1,
+            search_returned=1,
+            top5_scores=[2.4],
+        )
+        report = stats.collect([record])
+        self.assertEqual(report.search_runs, 1)
+        self.assertEqual(report.search_returned_total, 1)
+        self.assertEqual(report.search_empty, 0)
+        self.assertEqual(report.search_no_hits, 0)
+
+    def test_written_turn_counts_as_captured(self) -> None:
+        """Успешная запись в журнал — это захваченный ход."""
+
+        record = log_entry(
+            "capture_record_written",
+            project="common",
+            turns_seen=1,
+            turns_captured=1,
+            turns_skipped=0,
+            turns_derived=0,
+        )
+        report = stats.collect([record])
+        self.assertEqual(report.turns_seen, 1)
+        self.assertEqual(report.turns_captured, 1)
+        self.assertEqual(report.turns_skipped, 0)
 
 
 class DoctorCliTests(BackupSettingsCase):
@@ -752,14 +836,27 @@ class StatsCliTests(BackupSettingsCase):
 class HookScriptsTests(unittest.TestCase):
     """Состав установки §26.3: три скрипта хуков рядом с кодом MiniMem."""
 
+    HOOKS = ("pre_llm.py", "post_llm.py", "session_end.py")
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.tmp = Path(self._tmp.name)
+        self.addCleanup(self._tmp.cleanup)
+        self.config_file = self.tmp / "config.json"
+        payload = dict(DEFAULTS)
+        payload["memory_root"] = str(self.tmp / "memory")
+        self.config_file.write_text(
+            json.dumps(payload, ensure_ascii=False), encoding="utf-8"
+        )
+
     def test_hook_scripts_exist(self) -> None:
-        for name in ("pre_llm.py", "post_llm.py", "session_end.py"):
+        for name in self.HOOKS:
             path = CODE_DIR / "hooks" / name
             with self.subTest(hook=name):
                 self.assertTrue(path.is_file(), f"нет {path}")
 
     def test_hook_scripts_compile(self) -> None:
-        for name in ("pre_llm.py", "post_llm.py", "session_end.py"):
+        for name in self.HOOKS:
             path = CODE_DIR / "hooks" / name
             with self.subTest(hook=name):
                 result = subprocess.run(
@@ -769,6 +866,76 @@ class HookScriptsTests(unittest.TestCase):
                     timeout=60,
                 )
                 self.assertEqual(result.returncode, 0, result.stderr)
+
+    def run_hook(self, name: str, payload: dict) -> None:
+        env = dict(os.environ)
+        env["MINIMEM_CONFIG"] = str(self.config_file)
+        result = subprocess.run(
+            [sys.executable, "-B", str(CODE_DIR / "hooks" / name)],
+            input=json.dumps(payload, ensure_ascii=False),
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            env=env,
+            timeout=120,
+        )
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+
+    def log_records(self) -> list[dict]:
+        log_file = self.tmp / "memory" / "logs" / "minimem.log"
+        if not log_file.exists():
+            return []
+        return [
+            json.loads(line)
+            for line in log_file.read_text(encoding="utf-8").splitlines()
+            if line.strip()
+        ]
+
+    def test_hooks_log_their_duration(self) -> None:
+        """§22 и §21.3: каждый хук пишет `duration_ms`, иначе задержки нулевые."""
+
+        self.run_hook(
+            "post_llm.py",
+            {
+                "session_id": "s1",
+                "cwd": "C:/projects/work",
+                "extra": {
+                    "task_id": "t1",
+                    "turn_id": "1",
+                    "user_message": "проверка задержки",
+                    "assistant_response": "ответ",
+                },
+            },
+        )
+        self.run_hook(
+            "pre_llm.py",
+            {
+                "session_id": "s2",
+                "cwd": "C:/projects/work",
+                "extra": {"task_id": "t2", "turn_id": "1", "user_message": "вопрос"},
+            },
+        )
+        self.run_hook(
+            "session_end.py",
+            {
+                "session_id": "s2",
+                "cwd": "C:/projects/work",
+                "extra": {"completed": True},
+            },
+        )
+        durations = [
+            record
+            for record in self.log_records()
+            if record.get("operation") == "hook_completed"
+        ]
+        self.assertEqual(
+            sorted(record["hook_event"] for record in durations),
+            ["on_session_end", "post_llm_call", "pre_llm_call"],
+        )
+        for record in durations:
+            with self.subTest(hook=record["hook_event"]):
+                self.assertIsInstance(record["duration_ms"], int)
+                self.assertGreaterEqual(record["duration_ms"], 0)
 
 
 @unittest.skipUnless(

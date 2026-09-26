@@ -4,14 +4,11 @@
   "sqlite_filename": "minimem.db",
   "log_filename": "minimem.log",
   "project_mapping": {},
-
   "mode_capture": true,
-  "mode_return": false,
-  "mode_search": false,
-  "mode_compaction": false,
-
+  "mode_return": true,
+  "mode_search": true,
+  "mode_compaction": true,
   "compaction_rule2_enabled": false,
-
   "max_user_text": 2000,
   "max_assistant_text": 4000,
   "max_memory_record": 8000,
@@ -21,12 +18,10 @@
   "max_return_chars": 1500,
   "max_search_query": 256,
   "max_search_terms": 8,
-
   "search_score_threshold": 1.0,
   "search_score_ratio": 0.35,
   "search_min_word_len": 4,
   "search_stem_min_len": 4,
-
   "compaction_age": 180,
   "compaction_unused_age": 30,
   "compaction_shrink_ratio": 0.6,
@@ -34,13 +29,10 @@
   "compaction_min_chars_drop": 3000,
   "compaction_cooldown_turns": 2,
   "max_return_injections_per_session": 3,
-
   "journal_fsync": true,
   "journal_timezone": "system",
-
   "catch_up_retry_max_turns": 2,
   "catch_up_budget_seconds": 8,
-
   "pre_llm_timeout": 15,
   "post_llm_timeout": 30,
   "hook_safety_margin_ms": 2000,

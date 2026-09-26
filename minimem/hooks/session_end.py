@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import sys
+import time
 from pathlib import Path
 from typing import Any
 
@@ -130,7 +131,24 @@ def run(event: dict, config, memory_root: Path, logger: Logger) -> digest.Digest
         )
 
 
+def _log_duration(logger: Logger, started: float, status: str) -> None:
+    """Задержка хука в лог: §22 (`duration_ms`) и §21.3 (p50/p95/max по хукам).
+
+    Замер делает хук целиком: модули `duration_ms` не пишут, поэтому без этой
+    строки в отчёте `stats` задержки всегда нулевые.
+    """
+
+    logger.log(
+        "hook",
+        "hook_completed",
+        status=status,
+        hook_event="on_session_end",
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
 def main() -> int:
+    started = time.monotonic()
     try:
         event = read_event(sys.stdin)
     except Exception:  # noqa: BLE001 - хук не имеет права упасть (§19.2)
@@ -148,7 +166,11 @@ def main() -> int:
         run(event, config, memory_root, logger)
     except Exception as exc:  # noqa: BLE001 - граница хука (§19.2)
         logger.error("digest", "digest_failed", type(exc).__name__, hook_event="on_session_end")
+        _log_duration(logger, started, "error")
+        print("{}")
+        return 0
 
+    _log_duration(logger, started, "ok")
     print("{}")
     return 0
 

@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import os
 import sys
+import time
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -65,7 +66,24 @@ def turn_from_event(event: dict) -> capture.TurnData:
     )
 
 
+def _log_duration(logger: Logger, hook_event: str, started: float, status: str) -> None:
+    """Задержка хука в лог: §22 (`duration_ms`) и §21.3 (p50/p95/max по хукам).
+
+    Замер делает хук целиком: модули `duration_ms` не пишут, поэтому без этой
+    строки в отчёте `stats` задержки всегда нулевые.
+    """
+
+    logger.log(
+        "hook",
+        "hook_completed",
+        status=status,
+        hook_event=hook_event,
+        duration_ms=int((time.monotonic() - started) * 1000),
+    )
+
+
 def main() -> int:
+    started = time.monotonic()
     try:
         event = read_event(sys.stdin)
     except Exception:  # noqa: BLE001 - хук не имеет права упасть (§19.2)
@@ -81,6 +99,7 @@ def main() -> int:
     logger = Logger(paths.log_path(memory_root, config["log_filename"]))
     if not config["mode_capture"]:
         logger.log("capture", "capture_disabled", status="skipped", hook_event="post_llm_call")
+        _log_duration(logger, "post_llm_call", started, "skipped")
         print("{}")
         return 0
 
@@ -100,6 +119,7 @@ def main() -> int:
             "indexer", "indexer_failed", type(exc).__name__, hook_event="post_llm_call"
         )
 
+    _log_duration(logger, "post_llm_call", started, "ok")
     print("{}")
     return 0
 
