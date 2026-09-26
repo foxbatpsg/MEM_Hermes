@@ -1,16 +1,15 @@
-"""Хук pre_llm_call: режимы, Возврат, заглушка Поиска.
+"""Хук pre_llm_call: режимы, Возврат, Поиск по реплике.
 
-Основание: ТЗ v1.7 §12 (хук Поиска), §18 (жизненный цикл хуков), §26.2
-(формат обмена), §19.1 (таймаут pre_llm_call), §19.2 (изоляция ошибок);
-план реализации v1.7, этап 4.
+Основание: ТЗ v1.7 §12 (хук Поиска), §3.3, §18 (жизненный цикл хуков),
+§26.2 (формат обмена), §19.1 (таймаут pre_llm_call), §19.2 (изоляция
+ошибок); план реализации v1.7, этапы 4 и 5.
 
 Скрипт тонкий: читает stdin, вызывает модули, пишет в stdout
 `{"context": "..."}` либо пустой объект и всегда завершается кодом 0.
 
-На этом этапе реализован Возврат. Поиск по реплике (`mode_search`)
-подключается на этапе 5 плана: сейчас действует только режимный gate и
-лог `search_not_implemented`, чтобы включённый `mode_search` был виден в
-наблюдаемости и не приводил к выдаче результата.
+Порядок §18: состояние сессии -> метрики истории и решение о сжатии ->
+Возврат при `mode_return` -> Поиск при `mode_search` на ходах, где Возврат
+не вставлял. Любой отказ перехватывается здесь и не выходит наружу.
 """
 
 from __future__ import annotations
@@ -23,7 +22,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mm import paths, ret, session  # noqa: E402
+from mm import insert, paths, ret, search, session  # noqa: E402
 from mm.config import ConfigError, default_config_path, hook_deadline_ms, load_config  # noqa: E402
 from mm.log import Logger  # noqa: E402
 from mm.project import resolve_project  # noqa: E402
@@ -31,9 +30,6 @@ from mm.store import Store  # noqa: E402
 
 #: Переменная окружения с путём к конфигурации (используется в тестах).
 CONFIG_ENV = "MINIMEM_CONFIG"
-
-#: Событие о незавершённом Поиске этого этапа (§19.5).
-SEARCH_PENDING = "search_not_implemented"
 
 
 def config_path() -> Path:
@@ -71,12 +67,14 @@ def deadline_remaining(config, started: float) -> int:
 
 def handle_turn(
     event: dict, config, memory_root: Path, logger: Logger, started: float | None = None
-) -> ret.ReturnResult:
-    """Один ход `pre_llm_call`: учёт состояния, детекция сжатия, Возврат.
+):
+    """Один ход `pre_llm_call`: учёт состояния, детекция сжатия, Возврат, Поиск.
 
     Порядок §18: состояние сессии -> метрики истории и решение о сжатии ->
-    Возврат при `mode_return` -> gate Поиска. Любой отказ перехватывается
-    вызывающим хуком и не выходит наружу (§19.2).
+    Возврат при `mode_return` -> Поиск при `mode_search` на ходах, где
+    Возврат ничего не вставил. Возвращается результат фактически
+    вставленного модуля. Любой отказ перехватывается вызывающим хуком
+    и не выходит наружу (§19.2).
     """
 
     started = time.monotonic() if started is None else started
@@ -138,27 +136,34 @@ def handle_turn(
                 decision=decision,
                 deadline_remaining_ms=deadline_remaining(config, started),
             )
-        elif turn.is_first_turn or decision.detected:
-            # Поиск на первом ходе и на ходе Возврата не запускается (§12).
-            logger.log(
-                "search",
-                "search_skipped",
-                status="skipped",
-                session_id=turn.session_id,
-                project=project,
-                hook_event="pre_llm_call",
-                error_detail_code="return_turn",
-            )
-        if config["mode_search"] and result.status != ret.STATUS_INSERTED:
-            logger.log(
-                "search",
-                SEARCH_PENDING,
-                status="skipped",
-                session_id=turn.session_id,
-                project=project,
-                hook_event="pre_llm_call",
-                error_detail_code="stage5_not_implemented",
-            )
+        if config["mode_search"] and not result.inserted:
+            if turn.is_first_turn or (decision is not None and decision.detected):
+                # Поиск на первом ходе и на ходе Возврата не запускается
+                # (§3.3, §12): оба модуля решают это по флагу первого хода.
+                logger.log(
+                    "search",
+                    "search_skipped",
+                    status="skipped",
+                    session_id=turn.session_id,
+                    project=project,
+                    hook_event="pre_llm_call",
+                    search_terms=0,
+                    search_hits=0,
+                    search_returned=0,
+                    error_detail_code="return_turn",
+                )
+            else:
+                result = search.perform_search(
+                    store,
+                    config,
+                    logger,
+                    project,
+                    turn.session_id,
+                    # Блок памяти прошлой вставки не участвует в поиске
+                    # текущей реплики (§10 п.3).
+                    insert.strip_memory_block(turn.user_message).text,
+                    deadline_remaining_ms=deadline_remaining(config, started),
+                )
     return result
 
 
@@ -179,7 +184,7 @@ def main() -> int:
     try:
         result = handle_turn(event, config, memory_root, logger)
     except Exception as exc:  # noqa: BLE001 - граница хука (§19.2)
-        logger.error("return", "return_failed", type(exc).__name__, hook_event="pre_llm_call")
+        logger.error("hook", "return_failed", type(exc).__name__, hook_event="pre_llm_call")
         print("{}")
         return 0
 

@@ -506,6 +506,25 @@ class Store:
         rows = self._require().execute(sql, params).fetchall()
         return [dict(row) for row in rows]
 
+    def session_return_put(self, project: str, session_id: str, event_id: str, returned_at: str) -> None:
+        """Отмечает запись как возвращённую в текущей сессии (§12 п.12, §17)."""
+
+        self._require().execute(
+            "INSERT INTO session_returns (session_id, project, event_id, returned_at) "
+            "VALUES (?, ?, ?, ?) ON CONFLICT(session_id, project, event_id) DO UPDATE SET "
+            "returned_at = excluded.returned_at",
+            (session_id, project, event_id, returned_at),
+        )
+
+    def session_returned_ids(self, project: str, session_id: str) -> set[str]:
+        """event_id, уже возвращённые в этой сессии (§3.3, §12 п.6)."""
+
+        rows = self._require().execute(
+            "SELECT event_id FROM session_returns WHERE project = ? AND session_id = ?",
+            (project, session_id),
+        ).fetchall()
+        return {row["event_id"] for row in rows}
+
     def session_by_digest_file(self, digest_file: str) -> list[dict[str, Any]]:
         """Сессии, отображающиеся в указанный файл дайджеста (П-12)."""
 

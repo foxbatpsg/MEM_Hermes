@@ -530,15 +530,22 @@ class ModeAndHookTests(ReturnTestCase):
         self.assertFalse(result.inserted)
         self.assertIn("return_disabled", log_operations(self.tmp))
 
-    def test_mode_search_gate_is_logged_without_results(self) -> None:
-        """§12. Поиск этого этапа не реализован: gate виден в логе, выдачи нет."""
+    def test_mode_search_true_runs_real_search(self) -> None:
+        """П-11. При mode_search=true поиск выполняется, а не заглушается.
+
+        До этапа 5 на этом месте был gate с `search_not_implemented`;
+        теперь операция в логе — `search_injected`.
+        """
 
         self.config["mode_return"] = False
         self.config["mode_search"] = True
         result = self.handle(event(session_id=SESSION, turn_id="2", user="память и дайджест"))
         self.assertFalse(result.inserted)
         operations = log_operations(self.tmp)
-        self.assertIn("search_not_implemented", operations)
+        self.assertNotIn("search_not_implemented", operations)
+        self.assertTrue(
+            {"search_completed", "search_injected", "search_skipped"} & set(operations)
+        )
 
     def test_46_empty_output_does_not_change_user_message(self) -> None:
         """MM-46. Пустой вывод хука не меняет сообщение пользователя."""

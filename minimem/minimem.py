@@ -19,7 +19,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
-from mm import MINIMEM_VERSION, digest, indexer, paths  # noqa: E402
+from mm import MINIMEM_VERSION, digest, indexer, insert, paths  # noqa: E402
 from mm.config import Config, ConfigError, load_config  # noqa: E402
 from mm.log import Logger  # noqa: E402
 from mm.project import current_cwd, resolve_project  # noqa: E402
@@ -225,6 +225,73 @@ def cmd_show(config: Config, args: argparse.Namespace) -> int:
 
 
 
+def cmd_search(config: Config, args: argparse.Namespace) -> int:
+    """Тот же пайплайн, что хук поиска, но без вставки и без счётчиков (§21.2).
+
+    Команда административная: индекс, `usage_count` и `session_returns` не
+    меняются. С `--explain` печатаются основы, собранный запрос, режим,
+    score каждой кандидатуры и причина отсева — этого достаточно для
+    калибровки `search_score_ratio` и `search_score_threshold` (П-11).
+    """
+
+    from mm import search as search_module
+
+    memory_root = paths.config_memory_root(config)
+    cwd = str(args.project) if getattr(args, "project", None) else current_cwd()
+    project, _ = resolve_project(cwd, config["project_mapping"])
+
+    try:
+        store = _open_store(config, memory_root)
+    except StoreUnavailable as exc:
+        print(f"проблема: SQLite недоступен ({exc})")
+        return EXIT_PROBLEMS
+
+    text = " ".join(args.query) if isinstance(args.query, list) else str(args.query)
+    with store:
+        search_plan = search_module.plan(
+            store,
+            config,
+            project,
+            session_id="",
+            text=text,
+            # Вне хука фильтр проекта не применяется к выдаче FTS5, но чужие
+            # записи всё равно отсеиваются: --explain должен показывать и их.
+            restrict_project=False,
+        )
+
+    if not search_plan.stems:
+        print("search: после нормализации не осталось ни одного термина")
+        return EXIT_OK
+
+    if args.explain:
+        print(f"проект: {project}")
+        print(f"основы: {', '.join(search_plan.stems)}")
+        print(f"режим запроса: {search_plan.query_mode}")
+        print(f"fts-запрос: {search_plan.match_query}")
+        print(f"порог: {search_plan.threshold:.4f} ({search_plan.threshold_applied})")
+        print(f"попаданий: {search_plan.hits}")
+        for candidate in search_plan.candidates:
+            verdict = (
+                "выдаётся" if candidate.selected else f"отсев: {candidate.reject_reason}"
+            )
+            print(
+                f"  {candidate.event_id} score={candidate.score:.4f} "
+                f"session={candidate.session_id} turn={candidate.turn} — {verdict}"
+            )
+
+    body, kept, _cut = search_module.assemble_body(config, search_plan.selected)
+    if body:
+        block, truncated = insert.build_memory_block(
+            body, int(config["max_return_chars"])
+        )
+        print(f"выдано записей: {len(kept)}" + (" (обрезано)" if truncated else ""))
+        print("event_id: " + ", ".join(item.event_id for item in kept))
+        print(block)
+    else:
+        print("выдано записей: 0")
+    return EXIT_OK
+
+
 def cmd_status(config: Config, args: argparse.Namespace) -> int:
     """Путь журнала, число файлов, состояние SQLite, активные режимы (§21)."""
 
@@ -361,6 +428,7 @@ COMMANDS = {
     "rebuild-index": cmd_rebuild_index,
     "rebuild-digest": cmd_rebuild_digest,
     "show": cmd_show,
+    "search": cmd_search,
 }
 
 
@@ -395,6 +463,20 @@ def build_parser() -> argparse.ArgumentParser:
 
     show = subparsers.add_parser("show", help="показать запись журнала по event_id")
     show.add_argument("event_id")
+
+    search_parser = subparsers.add_parser(
+        "search",
+        help="поиск по реплике без вставки и без влияния на счётчики (П-11)",
+    )
+    search_parser.add_argument("query", nargs="+", help="текст запроса")
+    search_parser.add_argument(
+        "--explain",
+        action="store_true",
+        help="основы, FTS-запрос, режим, score и причины отсева",
+    )
+    search_parser.add_argument(
+        "--project", type=Path, default=None, help="каталог проекта для поиска"
+    )
 
     verify_parser = subparsers.add_parser("verify", help="проверка целостности и конфигурации")
     verify_parser.add_argument(
