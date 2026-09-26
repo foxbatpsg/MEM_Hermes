@@ -158,3 +158,46 @@ def strip_memory_block(user_message: str) -> StripResult:
     cleaned = user_message[:start_char] + user_message[end_char + 1 :]
     return StripResult(cleaned, 1, (end_char + 1) - start_char)
 
+
+#: Пометка обрезки при вставке в контекст (§13.1 п.3, §6).
+TRUNCATION_MARK = " [обрезано]"
+
+#: Служебная часть блока: вводная строка, пустая строка и два делимитера.
+_FIXED_OVERHEAD = len(INTRO_LINE) + 2 + len(START_DELIMITER) + 1 + len(END_DELIMITER)
+
+
+def build_memory_block(body: str, max_chars: int) -> tuple[str, bool]:
+    """Собирает блок памяти для вставки в сообщение пользователя (§13).
+
+    Тело проходит санитизацию по §13.1, затем обрезается по строкам до
+    `max_return_chars` с пометкой обрезки. Возвращает пару
+    `(текст, признак обрезки)`.
+    """
+
+    sanitized = sanitize_for_insert(body or "")
+    if max_chars <= 0 or max_chars <= _FIXED_OVERHEAD + len(TRUNCATION_MARK):
+        # Бюджета не хватает даже на делимитеры с пометкой: пустой блок не
+        # вставляется вовсе, иначе вставка несла бы смысл без данных.
+        return "", False
+
+    budget = max_chars - _FIXED_OVERHEAD
+    if len(sanitized) > budget:
+        sanitized = _truncate_to_budget(sanitized, budget)
+    block = "\n".join([INTRO_LINE, "", START_DELIMITER, sanitized, END_DELIMITER])
+    return block, len(sanitized) < len(sanitize_for_insert(body or ""))
+
+
+def _truncate_to_budget(text: str, budget: int) -> str:
+    """Обрезает текст по границе строк, иначе — жёстко по символам (§13.1 п.3)."""
+
+    if budget <= len(TRUNCATION_MARK):
+        return TRUNCATION_MARK.strip()[:budget]
+    limit = budget - len(TRUNCATION_MARK)
+    head = text[:limit]
+    newline = head.rfind("\n")
+    if newline > 0:
+        head = head[:newline].rstrip()
+    if not head:
+        head = text[:limit].rstrip()
+    return head + TRUNCATION_MARK
+
