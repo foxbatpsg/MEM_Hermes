@@ -340,6 +340,8 @@ allowlist не выполнена — только подготовлено.
 
 ### Этап 6. Уплотнение
 
+Статус: выполнен 2026-09-26. Создан `mm/compaction.py` (правила 1–3 §15, tie-breaker `timestamp_utc` / `turn_numeric` / `turn` / `event_id`, `plan_compaction` и `run_compaction`, `rebuild_suppression`, `auto_compaction_enabled` и `note_disabled` для `mode_compaction`, лог `compaction_applied` / `compaction_rebuilt` / `compaction_skipped`); в `mm/store.py` добавлены `meta_all`, `suppressed_map`, `suppressed_count`, `usage_all`; в `mm/indexer.py` `rebuild_index` пишет `rebuilt_at` в UTC и пересчитывает снятые по правилам 1 и 3; в `minimem.py` добавлена команда `compact` с `--dry-run`, а `rebuild-index` передаёт конфигурацию для пересчёта снятых. Тесты этапа — `minimem/tests/test_compaction.py`, 22 теста, номера 34–39, 43, 44, MM-54, MM-60, MM-64, MM-65, MM-79; полный прогон из `minimem/` — 221 тест (199 этапов 0–5 + 22 этапа 6), код возврата 0. Все номера уже присутствовали в `tests/required_tests.txt` — файл не изменялся. Проверка на копии рабочего хранилища (8 записей, проект `common`): `verify` — без проблем, `rebuild-index` — 8 записей и 0 проблем, `compact` — 0 снятых (все записи моложе `compaction_age`), повторный `compact` идемпотентен, `verify` после него — без проблем. `compaction_rule2_enabled` и `mode_compaction` в рабочем `minimem/config.json` остаются `false`. Вызов уплотнения из `on_session_end` — этап 7; регистрация хуков — этап 8.
+
 Цель: механическое снятие записей с поиска без удаления истории.
 
 Что делаем:

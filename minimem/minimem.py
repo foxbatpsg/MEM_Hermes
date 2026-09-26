@@ -140,7 +140,7 @@ def cmd_rebuild_index(config: Config, args: argparse.Namespace) -> int:
         print(f"проблема: SQLite недоступен ({exc})")
         return EXIT_PROBLEMS
     with store:
-        result = indexer.rebuild_index(store, memory_root, logger, project=project)
+        result = indexer.rebuild_index(store, memory_root, logger, project=project, config=config)
     print(
         f"rebuild-index: проиндексировано {result.records_indexed}, "
         f"заменено ревизий {result.revisions}, дублей {result.duplicates}, "
@@ -292,6 +292,52 @@ def cmd_search(config: Config, args: argparse.Namespace) -> int:
     return EXIT_OK
 
 
+def cmd_compact(config: Config, args: argparse.Namespace) -> int:
+    """Ручное уплотнение: снятие записей с поиска без удаления истории (§21.5).
+
+    Команда административная и выполняется при `mode_compaction = false`
+    (§3.5, §3.7.7), но уважает `compaction_rule2_enabled`: выключенное
+    правило 2 не включается этой командой (§15.1, тест MM-79).
+    """
+
+    from mm import compaction as compaction_module
+
+    memory_root = paths.config_memory_root(config)
+    logger = build_logger(config, memory_root)
+    try:
+        store = _open_store(config, memory_root)
+    except StoreUnavailable as exc:
+        print(f"проблема: SQLite недоступен ({exc})")
+        return EXIT_PROBLEMS
+
+    with store:
+        result = compaction_module.run_compaction(
+            store,
+            config,
+            logger,
+            dry_run=bool(getattr(args, "dry_run", False)),
+        )
+
+    counts = compaction_module.plan_compaction_counts(result.suppressions)
+    mode = "пробный прогон" if getattr(args, "dry_run", False) else "уплотнение"
+    print(
+        f"compact: {mode}, просмотрено записей {result.scanned}, "
+        f"снято {len(result.suppressions)} "
+        f"(по возрасту {counts[compaction_module.REASON_AGE]}, "
+        f"дублей {counts[compaction_module.REASON_DUPLICATE]}, "
+        f"неиспользованных {counts[compaction_module.REASON_UNUSED]})"
+    )
+    print(
+        f"правило 2: {'включено' if config['compaction_rule2_enabled'] else 'выключено'}, "
+        f"mode_compaction: {'вкл' if config['mode_compaction'] else 'выкл'}"
+    )
+    if result.already_suppressed:
+        print(f"уже снято ранее: {result.already_suppressed}")
+    for error in result.errors:
+        print(f"проблема: {error}")
+    return EXIT_OK if result.ok else EXIT_PROBLEMS
+
+
 def cmd_status(config: Config, args: argparse.Namespace) -> int:
     """Путь журнала, число файлов, состояние SQLite, активные режимы (§21)."""
 
@@ -429,6 +475,7 @@ COMMANDS = {
     "rebuild-digest": cmd_rebuild_digest,
     "show": cmd_show,
     "search": cmd_search,
+    "compact": cmd_compact,
 }
 
 
@@ -476,6 +523,16 @@ def build_parser() -> argparse.ArgumentParser:
     )
     search_parser.add_argument(
         "--project", type=Path, default=None, help="каталог проекта для поиска"
+    )
+
+    compact_parser = subparsers.add_parser(
+        "compact",
+        help="механическое уплотнение: снять записи с поиска без удаления",
+    )
+    compact_parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="только показать, что будет снято, без записи в служебный слой",
     )
 
     verify_parser = subparsers.add_parser("verify", help="проверка целостности и конфигурации")

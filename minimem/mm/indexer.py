@@ -13,11 +13,11 @@ from __future__ import annotations
 import sqlite3
 import time
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
-from . import canonical, journal, paths
+from . import canonical, compaction, journal, paths
 from .log import Logger
 from .store import Store
 
@@ -364,17 +364,30 @@ def rebuild_index(
     memory_root: Path,
     logger: Logger,
     project: str | None = None,
+    config: Mapping[str, Any] | None = None,
 ) -> IndexResult:
     """Полностью пересоздаёт индексный слой из журнала (§4.3, §21.5).
 
-    Счётчики использования и снятие по правилу 2 не восстанавливаются:
-    после пересборки эти записи возвращаются в поиск (§4.3, §15).
+    Порядок §15: пересборка, запись `rebuilt_at`, индексация, пересчёт снятых
+    записей по правилам 1 и 3. Счётчики использования обнуляются, поэтому
+    снятие по правилу 2 не восстанавливается: такие записи возвращаются в
+    поиск (§15, §16, тест 44). При `config = None` пересчёт снятых не
+    выполняется — вызов пересобирает только индекс.
     """
 
     store.drop_index_layer()
     store.create_schema()
+    # `rebuilt_at` в UTC: правило 2 сравнивает его с `timestamp_utc` (§15),
+    # а `timestamp_utc` записывается в нормализованном UTC (§4.1).
+    with store.connection:
+        store.set_meta(
+            "rebuilt_at", canonical.timestamp_utc(datetime.now(timezone.utc))
+        )
     logger.log("indexer", "rebuild_index", status="ok", records_indexed=0)
-    return index_project(store, memory_root, logger, project=project)
+    result = index_project(store, memory_root, logger, project=project)
+    if config is not None:
+        compaction.rebuild_suppression(store, config, logger)
+    return result
 
 
 @dataclass

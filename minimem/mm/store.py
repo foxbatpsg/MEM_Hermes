@@ -307,6 +307,18 @@ class Store:
         row = self._require().execute("SELECT COUNT(*) AS n FROM memory_meta").fetchone()
         return int(row["n"] if row else 0)
 
+    def meta_all(self) -> list[dict[str, Any]]:
+        """Все строки `memory_meta` в порядке проектов и смещений в журнале.
+
+        Источник данных уплотнения (§15): правила 1 и 3 считаются по
+        метаданным всех записей, а не по одному проекту.
+        """
+
+        rows = self._require().execute(
+            "SELECT * FROM memory_meta ORDER BY project, journal_offset, event_id"
+        ).fetchall()
+        return [dict(row) for row in rows]
+
     def meta_by_project(self, project: str) -> list[dict[str, Any]]:
         rows = self._require().execute(
             "SELECT * FROM memory_meta WHERE project = ? ORDER BY journal_offset", (project,)
@@ -441,6 +453,18 @@ class Store:
         rows = self._require().execute("SELECT event_id FROM suppressed_records").fetchall()
         return {row["event_id"] for row in rows}
 
+    def suppressed_map(self) -> dict[str, str]:
+        """Снятые записи как `event_id -> reason` (§15)."""
+
+        rows = self._require().execute(
+            "SELECT event_id, reason FROM suppressed_records ORDER BY event_id"
+        ).fetchall()
+        return {row["event_id"]: row["reason"] for row in rows}
+
+    def suppressed_count(self) -> int:
+        row = self._require().execute("SELECT COUNT(*) AS n FROM suppressed_records").fetchone()
+        return int(row["n"] if row else 0)
+
     def clear_suppressed(self) -> None:
         self._require().execute("DELETE FROM suppressed_records")
 
@@ -542,6 +566,14 @@ class Store:
             "SELECT usage_count FROM usage_counters WHERE event_id = ?", (event_id,)
         ).fetchone()
         return int(row["usage_count"] if row else 0)
+
+    def usage_all(self) -> dict[str, int]:
+        """Счётчики использования всех записей: `event_id -> usage_count` (§16)."""
+
+        rows = self._require().execute(
+            "SELECT event_id, usage_count FROM usage_counters"
+        ).fetchall()
+        return {row["event_id"]: int(row["usage_count"]) for row in rows}
 
     def bump_usage(self, event_id: str, used_at: str) -> None:
         self._require().execute(
