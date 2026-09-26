@@ -202,6 +202,23 @@ def hook_deadline_ms(values: Mapping[str, Any], hook: str) -> int:
     return int(float(timeout_s) * 1000) - int(margin_ms)
 
 
+def catch_up_budget_ms(values: Mapping[str, Any]) -> int:
+    """Суббюджет catch-up: 40 % от дедлайна, не больше `catch_up_budget_seconds`.
+
+    `catch_up_budget_seconds` — верхняя граница (§19.1.1, §20), поэтому берётся
+    минимум из двух ограничений.
+    """
+
+    deadline_ms = hook_deadline_ms(values, "pre_llm")
+    return int(min(deadline_ms * CATCH_UP_SHARE, float(values["catch_up_budget_seconds"]) * 1000))
+
+
+def digest_budget_ms(values: Mapping[str, Any]) -> int:
+    """Суббюджет построения дайджеста при сжатии: 30 % от дедлайна (§19.1.1)."""
+
+    return int(hook_deadline_ms(values, "pre_llm") * COMPACTION_DIGEST_SHARE)
+
+
 def validate(values: Mapping[str, Any]) -> list[str]:
     """Инварианты конфигурации (ТЗ v1.7 §20 п.3, П-14).
 

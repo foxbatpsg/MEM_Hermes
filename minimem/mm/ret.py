@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any, Mapping
 
 from . import digest, insert, session
+from .config import digest_budget_ms
 from .log import Logger
 from .store import Store
 
@@ -204,16 +205,33 @@ def _digest_for_current_session(
     logger: Logger,
     session_id: str,
     project: str,
+    deadline_remaining_ms: int | None = None,
 ) -> DigestCandidate | None:
     """Файл дайджеста текущей сессии; при необходимости создаётся Дайджестом (§11).
 
     Журнал читает Дайджест, а не Возврат: сам модуль Возврата файла не
     создаёт и в состояние сессии не вмешивается.
+
+    Построение дайджеста при сжатии укладывается в суббюджет 30 % от
+    `hook_deadline_ms` (§19.1.1, П-06). Если остатка меньше, файл не
+    создаётся, причина пишется в лог, а Возврат ничего не вставляет (MM-111).
     """
 
     path = digest.digest_path(memory_root, project, session_id)
     header = digest.read_header(path)
     if header is None:
+        if deadline_remaining_ms is not None and deadline_remaining_ms < digest_budget_ms(config):
+            logger.log(
+                "ret",
+                "return_digest_timeout",
+                status="skipped",
+                session_id=session_id,
+                project=project,
+                hook_event="pre_llm_call",
+                error_detail_code="digest_budget_exhausted",
+                deadline_remaining_ms=deadline_remaining_ms,
+            )
+            return None
         logger.log(
             "ret",
             "return_digest_rebuild",
@@ -231,6 +249,7 @@ def _digest_for_current_session(
             session_id,
             project,
             hook_event="pre_llm_call",
+            deadline_remaining_ms=deadline_remaining_ms,
         )
         if not result.created_ok:
             return None
@@ -291,7 +310,13 @@ def perform_return(
         candidate = select_last_digest(memory_root, project, turn.session_id, logger)
     else:
         candidate = _digest_for_current_session(
-            store, config, memory_root, logger, turn.session_id, project
+            store,
+            config,
+            memory_root,
+            logger,
+            turn.session_id,
+            project,
+            deadline_remaining_ms=deadline_remaining_ms,
         )
 
     if candidate is None:

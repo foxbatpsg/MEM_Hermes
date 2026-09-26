@@ -458,6 +458,7 @@ def build_digest(
     completion: str = COMPLETION_FULL,
     created: str = "",
     hook_event: str = "on_session_end",
+    deadline_remaining_ms: int | None = None,
 ) -> DigestResult:
     """Создаёт или перезаписывает файл дайджеста сессии (§14).
 
@@ -553,6 +554,8 @@ def build_digest(
         hook_event=hook_event,
         digest_chars=result.chars,
         records_scanned=view.turns_total,
+        # П-06: остаток дедлайна пишется всегда, где он известен.
+        deadline_remaining_ms=deadline_remaining_ms,
     )
     return result
 

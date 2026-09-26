@@ -1,15 +1,16 @@
 """Хук pre_llm_call: режимы, Возврат, Поиск по реплике.
 
 Основание: ТЗ v1.7 §12 (хук Поиска), §3.3, §18 (жизненный цикл хуков),
-§26.2 (формат обмена), §19.1 (таймаут pre_llm_call), §19.2 (изоляция
-ошибок); план реализации v1.7, этапы 4 и 5.
+§18.1 (catch-up), §26.2 (формат обмена), §19.1 (таймаут pre_llm_call),
+§19.2 (изоляция ошибок); план реализации v1.7, этапы 4, 5 и 7.
 
 Скрипт тонкий: читает stdin, вызывает модули, пишет в stdout
 `{"context": "..."}` либо пустой объект и всегда завершается кодом 0.
 
 Порядок §18: состояние сессии -> метрики истории и решение о сжатии ->
-Возврат при `mode_return` -> Поиск при `mode_search` на ходах, где Возврат
-не вставлял. Любой отказ перехватывается здесь и не выходит наружу.
+catch-up (если `mode_return` или `mode_compaction`) -> Возврат при
+`mode_return` -> Поиск при `mode_search` на ходах, где Возврат не вставлял.
+Любой отказ перехватывается здесь и не выходит наружу.
 """
 
 from __future__ import annotations
@@ -22,7 +23,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from mm import insert, paths, ret, search, session  # noqa: E402
+from mm import catchup, insert, paths, ret, search, session  # noqa: E402
 from mm.config import ConfigError, default_config_path, hook_deadline_ms, load_config  # noqa: E402
 from mm.log import Logger  # noqa: E402
 from mm.project import resolve_project  # noqa: E402
@@ -82,7 +83,9 @@ def handle_turn(
     project, _ = resolve_project(turn.cwd, config["project_mapping"])
     result = ret.ReturnResult(session_id=turn.session_id)
 
-    if not config["mode_return"] and not config["mode_search"]:
+    # Ранний выход: ни один из режимов, требующих pre_llm_call, не включён.
+    modes_on = any(bool(config[key]) for key in ("mode_return", "mode_search", "mode_compaction"))
+    if not modes_on:
         logger.log(
             "return",
             "return_disabled",
@@ -124,6 +127,28 @@ def handle_turn(
         state, decision = session.register_turn(
             store, config, logger, project, turn, deadline_remaining_ms=remaining_ms
         )
+        if config["mode_return"] or config["mode_compaction"]:
+            # Catch-up идёт перед Возвратом (§18): его отказ не должен мешать
+            # вставке, поэтому шаг изолирован отдельно (§19.2).
+            try:
+                catchup.run_catch_up(
+                    store,
+                    config,
+                    memory_root,
+                    logger,
+                    project,
+                    turn,
+                    deadline_remaining_ms=deadline_remaining(config, started),
+                )
+            except Exception as exc:  # noqa: BLE001 - шаг хука, не ход Hermes
+                logger.error(
+                    "catch_up",
+                    "catch_up",
+                    type(exc).__name__,
+                    session_id=turn.session_id,
+                    project=project,
+                    hook_event="pre_llm_call",
+                )
         if config["mode_return"]:
             result = ret.perform_return(
                 store,

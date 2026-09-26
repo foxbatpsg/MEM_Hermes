@@ -314,11 +314,41 @@ def touch_session(store: Store, project: str, turn: TurnEvent) -> None:
     fields: dict[str, Any] = {"last_seen_at": _now_iso()}
     if turn.turn_id:
         fields["last_known_turn"] = turn.turn_id
+    _write_session(store, project, turn.session_id, fields)
+
+
+def _write_session(
+    store: Store, project: str, session_id: str, fields: Mapping[str, Any]
+) -> None:
+    """Пишет поля строки `sessions`; отказ служебного слоя не мешает Hermes."""
+
     try:
         with store.connection:
-            store.session_upsert(turn.session_id, project, **fields)
+            store.session_upsert(session_id, project, **dict(fields))
     except Exception:  # noqa: BLE001 - состояние не критично для вставки
         return
+
+
+def save_metrics(
+    store: Store, project: str, session_id: str, state: SessionState
+) -> None:
+    """Пишет точки отсчёта истории в `sessions` (§17, §9.1).
+
+    `max_history_len` нормативно измеряется по истории без блоков памяти
+    MiniMem, поэтому сюда попадает `max_chars` — длина в символах, а не
+    `max_msgs`.
+    """
+
+    _write_session(
+        store,
+        project,
+        session_id,
+        {
+            "max_history_len": state.max_chars,
+            "max_msgs": state.max_msgs,
+            "max_chars": state.max_chars,
+        },
+    )
 
 
 def injection_limit_reached(config: Mapping[str, Any], state: SessionState) -> bool:
@@ -366,6 +396,7 @@ def register_turn(
         state.max_chars = max(state.max_chars, metrics.hist_chars)
 
     save_state(store, project, turn.session_id, state, logger)
+    save_metrics(store, project, turn.session_id, state)
     log_decision(logger, turn, project, decision, deadline_remaining_ms)
     return state, decision
 
