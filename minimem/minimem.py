@@ -280,16 +280,24 @@ def cmd_search(config: Config, args: argparse.Namespace) -> int:
                 f"session={candidate.session_id} turn={candidate.turn} — {verdict}"
             )
 
-    body, kept, _cut = search_module.assemble_body(config, search_plan.selected)
+    body, kept, _cut, dropped = search_module.assemble_body(config, search_plan.selected)
     if body:
         block, truncated = insert.build_memory_block(
             body, int(config["max_return_chars"])
         )
         print(f"выдано записей: {len(kept)}" + (" (обрезано)" if truncated else ""))
+        if dropped:
+            # Записи прошли порог, но не поместились в max_return_chars.
+            print(f"не поместилось в бюджет: {dropped}")
         print("event_id: " + ", ".join(item.event_id for item in kept))
         print(block)
     else:
         print("выдано записей: 0")
+        if dropped:
+            print(
+                f"не поместилось в бюджет: {dropped} — бюджет "
+                f"{config['max_return_chars']} мал для заголовков записей"
+            )
     return EXIT_OK
 
 

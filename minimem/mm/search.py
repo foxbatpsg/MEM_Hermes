@@ -173,12 +173,43 @@ def _fit(text: str, budget: int) -> tuple[str, bool]:
     return head + TRUNCATION_MARK, True
 
 
+def _marks(candidate: Candidate, moment: str) -> list[str]:
+    """Содержимое заголовка записи (§13): дата, проект, сессия, ход, источник."""
+
+    marks = [moment, f"проект {candidate.project}", f"сессия {candidate.session_id}"]
+    if candidate.turn:
+        marks.append(f"ход {candidate.turn}")
+    marks.append("источник: MiniMem")
+    return marks
+
+
+def _record_overhead(candidate: Candidate) -> int:
+    """Сколько символов записи съедает заголовок без текста.
+
+    Считается по фактическому заголовку, а не по короткому шаблону: в живой
+    сессии идентификатор сессии и хода длинный, и оценка «дата плюс две
+    метки» занижает расход в несколько раз. Из-за этого текст вытеснялся
+    за пределы общего бюджета, а запись целиком возвращала пустую строку и
+    молча выпадала из вставки (RB-21). Пометка «обрезано» учтена, потому
+    что при подрезанном тексте она появляется всегда.
+    """
+
+    moment = _moment(candidate.timestamp)
+    if not moment:
+        return 0
+    marks = _marks(candidate, moment) + ["обрезано"]
+    return len(f"[{' · '.join(marks)}]\n**Вы:** \n**Агент:** ")
+
+
 def render_record(candidate: Candidate, budget: int = 0) -> str:
     """Текст одной записи для вставки (§13).
 
     Обязательны дата, проект и источник MiniMem; запись без даты не
-    возвращается. `budget` — предел на запись: 0 означает «не обрезать».
-    При обрезке текста заголовок получает пометку «обрезано».
+    возвращается. `budget` — предел на текст записи без заголовка: 0
+    означает «не обрезать». Заголовок в бюджет не входит, его стоимость
+    вынесена в `assemble_body` и оплачивается до дележа текста, иначе он
+    съедает всё и запись выпадает (RB-21). При обрезке текста заголовок
+    получает пометку «обрезано».
     """
 
     moment = _moment(candidate.timestamp)
@@ -187,20 +218,13 @@ def render_record(candidate: Candidate, budget: int = 0) -> str:
     user_text = candidate.user_text
     assistant_text = candidate.assistant_text
     if budget > 0:
-        fixed = len(f"[{moment}]\n**Вы:** \n**Агент:** ")
-        available = budget - fixed
-        if available <= 0:
-            return ""
-        user_text, cut_user = _fit(user_text, available // 2)
-        assistant_text, cut_assistant = _fit(assistant_text, available - len(user_text))
+        user_text, cut_user = _fit(user_text, budget // 2)
+        assistant_text, cut_assistant = _fit(assistant_text, budget - len(user_text))
         cut = cut_user or cut_assistant
     else:
         cut = candidate.truncated in ("user", "assistant", "both")
 
-    marks = [moment, f"проект {candidate.project}", f"сессия {candidate.session_id}"]
-    if candidate.turn:
-        marks.append(f"ход {candidate.turn}")
-    marks.append("источник: MiniMem")
+    marks = _marks(candidate, moment)
     if cut:
         marks.append("обрезано")
     return (
@@ -261,7 +285,12 @@ def plan(
         candidates.append(candidate)
     result.candidates = candidates
 
-    scores = [item.score for item in candidates]
+    # Относительный порог считается по записям, которые вообще могут быть
+    # возвращены. Раньше `top` брался по всем попаданиям, включая уже
+    # отсеянные фильтрами: если лучшая запись помечена `already_returned`
+    # или `same_session`, она задавала порог, под который не подходил никто,
+    # и выдача пустела впустую (RB-22).
+    scores = [item.score for item in candidates if not item.reject_reason]
     top = max(scores) if scores else 0.0
     relative = top * float(config["search_score_ratio"])
     absolute = float(config["search_score_threshold"])
@@ -294,30 +323,66 @@ _BLOCK_OVERHEAD = (
 
 def assemble_body(
     config: Mapping[str, Any], selected: Sequence[Candidate]
-) -> tuple[str, list[Candidate], bool]:
+) -> tuple[str, list[Candidate], bool, int]:
     """Тело вставки из отобранных записей в пределах `max_return_chars`.
 
     Бюджет делится поровну между отобранными записями (§13.1 п.3): длинная
-    запись обрезается сама и не вытесняет остальные из вставки. Заголовок
-    записи с датой при обрезке сохраняется, как требует §13.
+    запись обрезается сама и не вытесняет остальные из вставки. Заголовок с
+    датой при обрезке сохраняется, как требует §13.
 
-    Возвращает пару `(тело, записи)` и признак обрезки текста.
+    Сначала оплачиваются заголовки всех отобранных записей, и только от
+    остатка делится текст. Заголовок — обязательная часть записи, и раньше
+    он вычитался из доли по короткому шаблону, из-за чего в длинных
+    сессиях весь бюджет уходил на заголовки, текст обрезался в ноль, и
+    записи молча выпадали из вставки (RB-21). Заголовки не вписываются —
+    тогда вставляется столько записей, сколько помещается, а факт усечения
+    видно по `truncated`.
+
+    Возвращает `(тело, записи, признак обрезки, число отобранных записей,
+    которые не поместились)`. Последнее нужно для логирования: раньше
+    выпадение записи не оставляло следа, и по логу было не отличить
+    «порог отсёк» от «не поместилось в бюджет».
     """
 
     limit = int(config["max_return_chars"]) - _BLOCK_OVERHEAD
-    if limit <= 0:
-        return "", [], False
-    share = max(limit // max(len(selected), 1), 1)
+    if limit <= 0 or not selected:
+        return "", [], False, len(selected)
+
+    overheads = [_record_overhead(candidate) for candidate in selected]
+    # Записи, чей заголовок сам не помещается, выпадают даже при нулевом
+    # тексте и не должны вытеснять те, что ещё влезают. Дальше оставляем
+    # столько записей, чтобы на текст каждой достался хотя бы один символ:
+    # ноль `render_record` трактует как «не обрезать» и выпускает блок целиком,
+    # который уже не помещается.
+    room = sorted(index for index, cost in enumerate(overheads) if cost < limit)
+    while room and (limit - sum(overheads[index] for index in room) - 2 * (len(room) - 1)) < len(room):
+        room.pop()
+    if not room:
+        return "", [], False, len(selected)
+
+    used = sum(overheads[index] for index in room)
+    # Между блоками вставляется пустая строка (`\n\n`), это тоже часть
+    # бюджета: без поправки последняя запись выпадала на несколько символов
+    # и размещение менялось в зависимости от round-down.
+    gaps = 2 * (len(room) - 1)
+    share = (limit - used - gaps) // len(room)
+
     kept: list[Candidate] = []
     blocks: list[str] = []
     total = 0
     truncated = False
-    for candidate in selected:
+    dropped: list[Candidate] = []
+    for index, candidate in enumerate(selected):
+        if index not in room:
+            dropped.append(candidate)
+            continue
         block = render_record(candidate, share)
         if not block:
+            dropped.append(candidate)
             continue
         if total + len(block) + 2 > limit:
-            break
+            dropped.append(candidate)
+            continue
         kept.append(candidate)
         blocks.append(block)
         total += len(block) + 2
@@ -327,7 +392,7 @@ def assemble_body(
             "both",
         ):
             truncated = True
-    return "\n\n".join(blocks), kept, truncated
+    return "\n\n".join(blocks), kept, truncated, len(dropped)
 
 
 def log_search(
@@ -341,6 +406,7 @@ def log_search(
     deadline_remaining_ms: int | None = None,
     error_detail_code: str | None = None,
     truncation_fields: str | None = None,
+    records_dropped: int = 0,
 ) -> None:
     """Лог поиска с обязательными полями контракта измеримости (§19.5, §22)."""
 
@@ -356,6 +422,11 @@ def log_search(
         "top5_scores": search_plan.top_scores(),
         "threshold_applied": search_plan.threshold_applied,
     }
+    # Записи, прошедшие порог, но не поместившиеся в max_return_chars. Без
+    # этого поля пустая выдача с высокими оценками неотличима от отсева по
+    # порогу (RB-21).
+    if records_dropped:
+        fields["records_dropped"] = records_dropped
     if deadline_remaining_ms is not None:
         fields["deadline_remaining_ms"] = deadline_remaining_ms
     if error_detail_code:
@@ -399,7 +470,7 @@ def perform_search(
         )
         return result
 
-    body, kept, records_cut = assemble_body(config, search_plan.selected)
+    body, kept, records_cut, dropped = assemble_body(config, search_plan.selected)
     if not body:
         result.status = STATUS_NO_HITS if not search_plan.hits else STATUS_EMPTY
         result.reason = "nothing_to_return"
@@ -412,6 +483,7 @@ def perform_search(
             search_plan,
             deadline_remaining_ms=deadline_remaining_ms,
             error_detail_code="no_passable_records",
+            records_dropped=dropped,
         )
         return result
 
@@ -453,5 +525,6 @@ def perform_search(
         returned=result.event_ids,
         deadline_remaining_ms=deadline_remaining_ms,
         truncation_fields="return_chars" if truncated else None,
+        records_dropped=dropped,
     )
     return result

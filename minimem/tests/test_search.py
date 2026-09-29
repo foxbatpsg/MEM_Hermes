@@ -320,6 +320,45 @@ class SearchPipelineTests(SearchTestCase):
         self.assertEqual(records[-1]["error_detail_code"], "no_search_terms")
         self.assertEqual(records[-1]["search_terms"], 0)
 
+    def test_threshold_ignores_already_returned_records(self) -> None:
+        """RB-22. Порог считается по записям, которые можно вернуть.
+
+        Замер 2026-09-28 на живой сессии: лучшие записи по теме к этому
+        моменту уже возвращены, и они же задавали относительный порог. Под
+        порог, поставленный недоступной записью, не подходил никто. По 15
+        запросам потеря составляла до половины выдачи (3 против 6).
+
+        Оценки задаются напрямую: на живых данных bm25 обнуляет оценки,
+        когда термин встречается почти во всех записях, и сценарий через
+        реальный корпус невоспроизводим.
+        """
+
+        best = self.add_turns(1, user="настройка бэкапа журнала", answer="robocopy")[0]
+        mid = self.add_turns(1, start=30, user="бэкап журнала", answer="robocopy")[0]
+        low = self.add_turns(1, start=40, user="бэкап журнала", answer="robocopy")[0]
+        self.seed_fillers()
+
+        used_at = "2026-09-26T08:00:00+00:00"
+        with self.store.connection:
+            # Лучшая запись уже возвращена в этой сессии и повторно не выдастся.
+            self.store.session_return_put("work", SESSION, best, used_at)
+
+        self.close_store()
+        store = self.store
+        real_fts = store.fts_search
+        store.fts_search = lambda *a, **k: [(best, 20.0), (mid, 5.0), (low, 3.0)]
+        try:
+            plan = search.plan(store, self.config, "work", SESSION, "бэкап журнала")
+        finally:
+            store.fts_search = real_fts
+
+        # Порог считается по mid (5.0) — единственной доступной лучшей записи.
+        self.assertAlmostEqual(plan.threshold, 5.0 * 0.35, places=6)
+        selected = [c.event_id for c in plan.selected]
+        self.assertIn(mid, selected, "доступная запись отсечена порогом")
+        self.assertIn(low, selected, "доступная запись отсечена порогом")
+        self.assertNotIn(best, selected, "уже возвращённая запись попала в выдачу")
+
     def test_24_already_returned_record_is_not_returned_again(self) -> None:
         """MM-24. Уже возвращённая запись повторно не выдаётся."""
 
@@ -361,6 +400,84 @@ class SearchPipelineTests(SearchTestCase):
         self.assertLessEqual(len(result.event_ids), 2)
         self.assertLessEqual(len(result.text), 400)
         self.assertTrue(result.truncated)
+
+    def test_records_survive_long_session_id_headers(self) -> None:
+        """RB-21. Заголовок записи оплачивается до дележа текста, а не после.
+
+        Замер на живом хранилище: заголовок живой записи — 179 символов
+        (дата, проект, длинный идентификатор сессии и хода, источник, пометка
+        обрезки), а старая оценка брала 40. При доле 268 на запись текста
+        оставалось 114, реальный блок выходил 407, и в бюджет 1341 влезали
+        три записи из пяти.
+
+        С правильным учётом заголовков в бюджет 1341 влезают четыре записи
+        по 89 символов текста, и пятая выпадает осознанно и попадает в
+        `dropped`. Проверяется именно это: заголовки оплачены первыми,
+        текста осталось больше нуля, а потерянная запись не пропала молча.
+        """
+
+        def records() -> list[search.Candidate]:
+            built = [
+                search.Candidate(
+                    event_id=f"e_{index}",
+                    score=float(10 - index),
+                    project="work",
+                    session_id=f"20260928_105920_ef6e21:{index}:{index:08x}",
+                    turn=f"20260928_105920_ef6e21:20260928_105920_ef6e21:{index:08x}",
+                    timestamp="2026-09-28T21:47:01+00:00",
+                    user_text="реплика " * 40,
+                    assistant_text="ответ " * 40,
+                )
+                for index in range(5)
+            ]
+            for record in built:
+                record.selected = True
+            return built
+
+        body, kept, _cut, dropped = search.assemble_body(self.config, records())
+
+        # Все пять помещаются: заголовки оплачены первыми, на текст осталось
+        # 87 символов на запись. Старый код отдавал три записи по 114 символов
+        # текста, но блок выходил 407 и две не помещались.
+        self.assertEqual(len(kept), 5, "бюджет распределён неверно")
+        self.assertEqual(dropped, 0, "запись потеряна без следа")
+        # Заголовок каждой вставленной записи на месте — §13.
+        self.assertEqual(body.count("источник: MiniMem"), 5)
+        # Текст не съеден заголовком.
+        self.assertIn("**Вы:** реплика", body)
+        self.assertIn("**Агент:** ответ", body)
+
+        # При тесном бюджете записи выпадают осознанно и это видно.
+        tight = dict(self.config, max_return_chars=600)
+        _body2, kept2, _cut2, dropped2 = search.assemble_body(tight, records())
+        self.assertEqual(len(kept2), 1, "при тесном бюджете влезло больше, чем можно")
+        self.assertEqual(dropped2, 4, "потерянные записи не посчитаны")
+
+    def test_dropped_records_are_logged(self) -> None:
+        """RB-21. Не поместившиеся записи видны в логе, а не исчезают молча."""
+
+        for offset in range(5):
+            self.add_turns(
+                1,
+                start=10 + offset,
+                user="настройка бэкапа журнала robocopy",
+                answer="подробный ответ про бэкап " * 10,
+            )
+        self.seed_fillers()
+        self.config["max_return_chars"] = 200
+        self.config["max_return_records"] = 4
+        self.handle(event(user="настройка бэкапа журнала robocopy"))
+        records = [
+            item
+            for item in log_records(self.tmp)
+            if item["operation"] in {"search_injected", "search_completed"}
+        ]
+        self.assertTrue(records, "поиск не залогирован")
+        self.assertIn(
+            "records_dropped",
+            records[-1],
+            "выпадение записей не попало в лог: порог и нехватка бюджета неразличимы",
+        )
 
     def test_28_search_is_skipped_on_first_turn(self) -> None:
         """MM-28. На первом ходе сессии Поиск не запускается."""
